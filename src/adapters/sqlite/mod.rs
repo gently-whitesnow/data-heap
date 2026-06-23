@@ -12,7 +12,7 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::domain::error::{Error, Result};
 use crate::domain::item::{Item, ItemId, NewItem};
 use crate::domain::ports::Storage;
-use crate::domain::source::{Source, Space, TranscriptionProvider};
+use crate::domain::source::{Source, Space};
 
 /// Single-connection SQLite storage. The connection is guarded by a `Mutex`
 /// because `rusqlite::Connection` is `!Sync`; a connection pool can replace this
@@ -61,17 +61,10 @@ impl Storage for SqliteStorage {
     fn upsert_source(&self, source: &Source) -> Result<()> {
         let conn = self.lock();
         conn.execute(
-            "INSERT INTO sources (slug, space, transcription_provider, created_at)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(slug) DO UPDATE SET
-                 space = excluded.space,
-                 transcription_provider = excluded.transcription_provider",
-            rusqlite::params![
-                source.slug,
-                source.space.as_str(),
-                source.transcription_provider.as_str(),
-                now_unix(),
-            ],
+            "INSERT INTO sources (slug, space)
+             VALUES (?1, ?2)
+             ON CONFLICT(slug) DO UPDATE SET space = excluded.space",
+            rusqlite::params![source.slug, source.space.as_str()],
         )
         .map_err(map_sqlite)?;
         Ok(())
@@ -80,14 +73,13 @@ impl Storage for SqliteStorage {
     fn list_sources(&self) -> Result<Vec<Source>> {
         let conn = self.lock();
         let mut stmt = conn
-            .prepare("SELECT slug, space, transcription_provider FROM sources ORDER BY slug")
+            .prepare("SELECT slug, space FROM sources ORDER BY slug")
             .map_err(map_sqlite)?;
         let rows = stmt
             .query_map([], |row| {
                 Ok(Source {
                     slug: row.get(0)?,
                     space: Space::new(row.get::<_, String>(1)?),
-                    transcription_provider: parse_provider(&row.get::<_, String>(2)?),
                 })
             })
             .map_err(map_sqlite)?;
@@ -99,29 +91,44 @@ impl Storage for SqliteStorage {
     }
 
     fn insert_item(&self, item: &NewItem) -> Result<ItemId> {
-        let metadata = serde_json::to_string(&item.telegram)
-            .map_err(|e| Error::Serialization(e.to_string()))?;
+        let extra = mapping::extra_json(&item.telegram)?;
         let conn = self.lock();
-        conn.execute(
-            "INSERT INTO items (source, space, kind, text, telegram_metadata, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                item.source,
-                item.space.as_str(),
-                item.kind.as_str(),
-                item.text,
-                metadata,
-                now_unix(),
-            ],
+        // Dedup on the Telegram message address: a repeated polling update is a
+        // no-op that returns the id of the already-stored item.
+        let inserted = conn
+            .execute(
+                "INSERT INTO items
+                    (source, space, kind, text, chat_id, message_id, telegram_extra, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(chat_id, message_id) DO NOTHING",
+                rusqlite::params![
+                    item.source,
+                    item.space.as_str(),
+                    item.kind.as_str(),
+                    item.text,
+                    item.telegram.chat_id,
+                    item.telegram.message_id,
+                    extra,
+                    now_unix(),
+                ],
+            )
+            .map_err(map_sqlite)?;
+        if inserted > 0 {
+            return Ok(ItemId(conn.last_insert_rowid()));
+        }
+        conn.query_row(
+            "SELECT id FROM items WHERE chat_id = ?1 AND message_id = ?2",
+            rusqlite::params![item.telegram.chat_id, item.telegram.message_id],
+            |row| row.get::<_, i64>(0),
         )
-        .map_err(map_sqlite)?;
-        Ok(ItemId(conn.last_insert_rowid()))
+        .map(ItemId)
+        .map_err(map_sqlite)
     }
 
     fn get_item(&self, id: ItemId) -> Result<Option<Item>> {
         let conn = self.lock();
         conn.query_row(
-            "SELECT id, source, space, kind, text, telegram_metadata, created_at
+            "SELECT id, source, space, kind, text, chat_id, message_id, telegram_extra, created_at
              FROM items WHERE id = ?1",
             [id.0],
             mapping::row_to_item,
@@ -135,7 +142,8 @@ impl Storage for SqliteStorage {
         let conn = self.lock();
         let mut stmt = conn
             .prepare(
-                "SELECT i.id, i.source, i.space, i.kind, i.text, i.telegram_metadata, i.created_at
+                "SELECT i.id, i.source, i.space, i.kind, i.text,
+                        i.chat_id, i.message_id, i.telegram_extra, i.created_at
                  FROM items i
                  WHERE i.space = ?1
                    AND NOT EXISTS (
@@ -169,15 +177,6 @@ impl Storage for SqliteStorage {
         )
         .map_err(map_sqlite)?;
         Ok(())
-    }
-}
-
-fn parse_provider(raw: &str) -> TranscriptionProvider {
-    match raw {
-        "mistral" => TranscriptionProvider::Mistral,
-        "openai" => TranscriptionProvider::Openai,
-        "local_whisper" => TranscriptionProvider::LocalWhisper,
-        _ => TranscriptionProvider::None,
     }
 }
 

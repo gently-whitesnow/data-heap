@@ -1,6 +1,6 @@
 use super::*;
 use crate::domain::item::{ItemKind, NewItem, TelegramMetadata};
-use crate::domain::source::{Source, Space, TranscriptionProvider};
+use crate::domain::source::{Source, Space};
 
 fn sample_item(space: &str, text: &str, message_id: i64) -> NewItem {
     NewItem {
@@ -31,20 +31,34 @@ fn upsert_and_list_sources() {
     let mut source = Source {
         slug: "expenses-bot".into(),
         space: Space::new("expenses"),
-        transcription_provider: TranscriptionProvider::Mistral,
     };
     storage.upsert_source(&source).unwrap();
 
     source.space = Space::new("inbox");
-    source.transcription_provider = TranscriptionProvider::None;
     storage.upsert_source(&source).unwrap();
 
     let sources = storage.list_sources().unwrap();
     assert_eq!(sources.len(), 1);
     assert_eq!(sources[0].space.as_str(), "inbox");
+}
+
+#[test]
+fn insert_item_dedups_on_telegram_message() {
+    let storage = SqliteStorage::open_in_memory().unwrap();
+    // Same (chat_id, message_id) => same item, stored once.
+    let id1 = storage
+        .insert_item(&sample_item("inbox", "first", 7))
+        .unwrap();
+    let id2 = storage
+        .insert_item(&sample_item("inbox", "retry", 7))
+        .unwrap();
+    assert_eq!(id1, id2);
+
+    let stored = storage.get_item(id1).unwrap().expect("item exists");
+    assert_eq!(stored.text, "first", "duplicate insert is a no-op");
     assert_eq!(
-        sources[0].transcription_provider,
-        TranscriptionProvider::None
+        storage.fetch_unprocessed("a", "inbox", 10).unwrap().len(),
+        1
     );
 }
 

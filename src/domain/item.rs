@@ -49,8 +49,9 @@ impl ItemKind {
     }
 }
 
-/// Telegram-side provenance kept alongside the text. Persisted as a JSON blob so
-/// the shape can grow without a schema migration.
+/// Telegram-side provenance kept alongside the text. Storage promotes
+/// `(chat_id, message_id)` to indexed columns (the message dedup key) and keeps
+/// the rest in a JSON blob so the shape can grow without a schema migration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TelegramMetadata {
     pub chat_id: i64,

@@ -50,12 +50,11 @@ pub struct SourceConfig {
 }
 
 impl SourceConfig {
-    /// Project the persisted view of this source (without secrets).
+    /// Project the persisted view of this source (slug→space binding only).
     pub fn to_source(&self) -> Source {
         Source {
             slug: self.slug.clone(),
             space: Space::new(self.space.clone()),
-            transcription_provider: self.transcription_provider,
         }
     }
 }

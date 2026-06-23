@@ -51,10 +51,10 @@ impl TranscriptionProvider {
 }
 
 /// A registered ingestion source — one Telegram bot pinned to one space.
-/// Secrets (bot/transcription tokens) live in config only, never in the entity.
+/// Transcription provider and all secrets live in config only; storage keeps
+/// just the source→space binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Source {
     pub slug: String,
     pub space: Space,
-    pub transcription_provider: TranscriptionProvider,
 }
