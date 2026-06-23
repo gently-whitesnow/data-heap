@@ -1,0 +1,25 @@
+# data-heap configuration. Copy to config.toml and fill in real tokens.
+# Run with: data-heap [path/to/config.toml]   (defaults to ./config.toml)
+
+[daemon]
+# SQLite database file; created on first run.
+database_path = "data-heap.sqlite"
+# Telegram long-polling interval, seconds.
+poll_interval_secs = 5
+# Local HTTP API bind address (agents connect here).
+http_addr = "127.0.0.1:8080"
+
+# One block per Telegram bot. Each bot is pinned to exactly one space.
+[[sources]]
+slug = "expenses-bot"
+space = "expenses"
+bot_token = "123456:REPLACE_ME"
+# transcription_provider: mistral | openai | local_whisper | none
+transcription_provider = "mistral"
+transcription_token = "sk-REPLACE_ME"
+
+[[sources]]
+slug = "thoughts-bot"
+space = "thoughts"
+bot_token = "234567:REPLACE_ME"
+# Voice transcription disabled — provider defaults to "none".
