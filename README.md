@@ -55,8 +55,11 @@ Telegram и SQLite в MVP — конкретные реализации, а не
 
 ## Конфигурация
 
-Источники и провайдеры задаются в TOML: на каждый бот — `bot token`, `space-slug`, провайдер и токен
-транскрибации. (Точный формат уточняется на этапе реализации.)
+Источники и провайдеры задаются в TOML: блок `[daemon]` (путь к SQLite, интервал polling, адрес
+HTTP API) и по блоку `[[sources]]` на каждый бот — `slug`, `space`, `bot_token`, а также
+`transcription_provider` (`mistral` / `openai` / `local_whisper` / `none`) и `transcription_token`.
+Полный пример — в [`config.example.toml`](config.example.toml). Запуск: `data-heap [config.toml]`
+(по умолчанию ищется `./config.toml`).
 
 ## Скиллы для агентов
 
