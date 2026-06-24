@@ -44,7 +44,6 @@ fn build_source(src: &SourceConfig) -> Result<Box<dyn IngestionSource>> {
     let transcription = transcription::build(
         src.transcription_provider,
         src.transcription_token.as_deref(),
-        src.transcription_url.as_deref(),
     )?;
     let adapter = TelegramSource::with_transcription(
         &src.slug,

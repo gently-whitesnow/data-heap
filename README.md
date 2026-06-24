@@ -48,7 +48,7 @@ Clean architecture, ports & adapters. Доменное ядро (item, source, s
 | -------------------- | ------------------------ | -------------------------------------- |
 | `Storage`            | SQLite                   | Postgres и др. — без правок ядра        |
 | `IngestionSource`    | Telegram (long-polling)  | другой мессенджер / webhook / импортер  |
-| `Transcription`      | mistral / openai / local_whisper / none | другой STT-провайдер     |
+| `Transcription`      | mistral / openai / none  | другой STT-провайдер                   |
 
 Telegram и SQLite в MVP — конкретные реализации, а не точки vendor lock. Порты вводим там, где
 подмена реалистична (storage, source, transcription), без оверинжиниринга на каждый слой.
@@ -57,7 +57,7 @@ Telegram и SQLite в MVP — конкретные реализации, а не
 
 Источники и провайдеры задаются в TOML: блок `[daemon]` (путь к SQLite, интервал polling, адрес
 HTTP API) и по блоку `[[sources]]` на каждый бот — `slug`, `space`, `bot_token`, а также
-`transcription_provider` (`mistral` / `openai` / `local_whisper` / `none`) и `transcription_token`.
+`transcription_provider` (`mistral` / `openai` / `none`) и `transcription_token`.
 Полный пример — в [`config.example.toml`](config.example.toml). Запуск: `data-heap [config.toml]`
 (по умолчанию ищется `./config.toml`).
 

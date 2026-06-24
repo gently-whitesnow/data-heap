@@ -1,10 +1,9 @@
 //! OpenAI-shaped hosted transcription adapter.
 //!
 //! OpenAI and Mistral expose the same multipart `audio/transcriptions` shape:
-//! `Authorization: Bearer <token>` + form parts `model=<id>` and
-//! `file=<audio bytes>`; the response is JSON `{ "text": "..." }`. One adapter
-//! parameterised by URL+model covers both — and any future provider that
-//! mimics this contract.
+//! `Authorization: Bearer <token>` + form parts `model=<id>`, `file=<bytes>`,
+//! and optional `language=<code>`; the response is JSON `{ "text": "..." }`.
+//! One adapter parameterised by URL+model covers both.
 
 use std::time::Duration;
 
@@ -18,44 +17,46 @@ use serde::Deserialize;
 use crate::domain::error::{Error, Result};
 use crate::domain::ports::Transcription;
 
-pub const OPENAI_DEFAULT_URL: &str = "https://api.openai.com/v1/audio/transcriptions";
-pub const OPENAI_DEFAULT_MODEL: &str = "whisper-1";
-pub const MISTRAL_DEFAULT_URL: &str = "https://api.mistral.ai/v1/audio/transcriptions";
-pub const MISTRAL_DEFAULT_MODEL: &str = "voxtral-mini-latest";
+const OPENAI_URL: &str = "https://api.openai.com/v1/audio/transcriptions";
+const OPENAI_MODEL: &str = "whisper-1";
+const MISTRAL_URL: &str = "https://api.mistral.ai/v1/audio/transcriptions";
+const MISTRAL_MODEL: &str = "voxtral-mini-2602";
+
+/// Hint sent to the provider so it doesn't auto-detect the wrong language for
+/// short clips. The bot's primary audience is Russian-speaking; English is
+/// recognised regardless because both providers fall back to multilingual
+/// decoding when the audio doesn't match the hint.
+const LANGUAGE: &str = "ru";
 
 /// Transcription request/response timeout. Voice messages are short (≤20 MB
 /// per Telegram limit), but providers can be slow on cold starts.
 const HTTP_TIMEOUT_SECS: u64 = 60;
 
 pub struct Hosted {
-    endpoint: String,
+    endpoint: &'static str,
+    model: &'static str,
     token: String,
-    model: String,
     http: Client,
 }
 
 impl Hosted {
-    pub fn openai(token: impl Into<String>, endpoint: impl Into<String>) -> Result<Self> {
-        Self::new(endpoint, token, OPENAI_DEFAULT_MODEL)
+    pub fn openai(token: impl Into<String>) -> Result<Self> {
+        Self::new(OPENAI_URL, OPENAI_MODEL, token)
     }
 
-    pub fn mistral(token: impl Into<String>, endpoint: impl Into<String>) -> Result<Self> {
-        Self::new(endpoint, token, MISTRAL_DEFAULT_MODEL)
+    pub fn mistral(token: impl Into<String>) -> Result<Self> {
+        Self::new(MISTRAL_URL, MISTRAL_MODEL, token)
     }
 
-    fn new(
-        endpoint: impl Into<String>,
-        token: impl Into<String>,
-        model: impl Into<String>,
-    ) -> Result<Self> {
+    fn new(endpoint: &'static str, model: &'static str, token: impl Into<String>) -> Result<Self> {
         let http = Client::builder()
             .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
             .build()
             .map_err(|e| Error::Transcription(format!("http client init: {e}")))?;
         Ok(Hosted {
-            endpoint: endpoint.into(),
+            endpoint,
+            model,
             token: token.into(),
-            model: model.into(),
             http,
         })
     }
@@ -69,12 +70,13 @@ impl Transcription for Hosted {
             .mime_str("application/octet-stream")
             .map_err(|e| Error::Transcription(format!("multipart mime: {e}")))?;
         let form = Form::new()
-            .text("model", self.model.clone())
+            .text("model", self.model)
+            .text("language", LANGUAGE)
             .part("file", part);
 
         let resp = self
             .http
-            .post(&self.endpoint)
+            .post(self.endpoint)
             .bearer_auth(&self.token)
             .multipart(form)
             .send()

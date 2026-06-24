@@ -14,7 +14,7 @@ http_addr = "127.0.0.1:8080"
 slug = "expenses-bot"
 space = "expenses"
 bot_token = "123456:REPLACE_ME"
-# transcription_provider: mistral | openai | local_whisper | none
+# transcription_provider: mistral | openai | none
 transcription_provider = "mistral"
 transcription_token = "sk-REPLACE_ME"
 
@@ -23,13 +23,3 @@ slug = "thoughts-bot"
 space = "thoughts"
 bot_token = "234567:REPLACE_ME"
 # Voice transcription disabled — provider defaults to "none".
-
-# Example: local OpenAI-compatible Whisper server (e.g. faster-whisper-server,
-# whisper.cpp's server). `transcription_token` is unused; `transcription_url`
-# is required and points to the /v1/audio/transcriptions endpoint.
-# [[sources]]
-# slug = "voice-bot"
-# space = "inbox"
-# bot_token = "345678:REPLACE_ME"
-# transcription_provider = "local_whisper"
-# transcription_url = "http://127.0.0.1:9000/v1/audio/transcriptions"

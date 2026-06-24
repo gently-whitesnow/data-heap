@@ -47,11 +47,6 @@ pub struct SourceConfig {
     pub transcription_provider: TranscriptionProvider,
     #[serde(default)]
     pub transcription_token: Option<String>,
-    /// Override the provider's HTTP endpoint. Required for `local_whisper`
-    /// (point at the local STT server); optional for hosted providers, mainly
-    /// useful in tests.
-    #[serde(default)]
-    pub transcription_url: Option<String>,
 }
 
 impl SourceConfig {
@@ -113,21 +108,6 @@ impl Config {
                     "source '{}' uses provider '{}' but has no transcription_token",
                     src.slug,
                     src.transcription_provider.as_str()
-                )));
-            }
-            if matches!(
-                src.transcription_provider,
-                TranscriptionProvider::LocalWhisper
-            ) && src
-                .transcription_url
-                .as_deref()
-                .unwrap_or("")
-                .trim()
-                .is_empty()
-            {
-                return Err(Error::Config(format!(
-                    "source '{}' uses provider 'local_whisper' but has no transcription_url",
-                    src.slug
                 )));
             }
             if !slugs.insert(&src.slug) {
