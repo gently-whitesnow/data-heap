@@ -14,6 +14,7 @@ mod confirm;
 mod parse;
 mod voice;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -63,6 +64,7 @@ pub struct TelegramSource {
     offset: i64,
     transcription: Option<Arc<dyn Transcription>>,
     storage: Arc<dyn Storage>,
+    allowed_user_ids: HashSet<i64>,
 }
 
 impl std::fmt::Debug for TelegramSource {
@@ -84,8 +86,18 @@ impl TelegramSource {
         token: SecretString,
         http: Client,
         storage: Arc<dyn Storage>,
+        allowed_user_ids: HashSet<i64>,
     ) -> Self {
-        Self::with_base_url(slug, space, token, DEFAULT_BASE_URL, None, http, storage)
+        Self::with_base_url(
+            slug,
+            space,
+            token,
+            DEFAULT_BASE_URL,
+            None,
+            http,
+            storage,
+            allowed_user_ids,
+        )
     }
 
     pub fn with_transcription(
@@ -95,6 +107,7 @@ impl TelegramSource {
         transcription: Option<Arc<dyn Transcription>>,
         http: Client,
         storage: Arc<dyn Storage>,
+        allowed_user_ids: HashSet<i64>,
     ) -> Self {
         Self::with_base_url(
             slug,
@@ -104,9 +117,11 @@ impl TelegramSource {
             transcription,
             http,
             storage,
+            allowed_user_ids,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn with_base_url(
         slug: impl Into<String>,
         space: Space,
@@ -115,6 +130,7 @@ impl TelegramSource {
         transcription: Option<Arc<dyn Transcription>>,
         http: Client,
         storage: Arc<dyn Storage>,
+        allowed_user_ids: HashSet<i64>,
     ) -> Self {
         TelegramSource {
             slug: slug.into(),
@@ -125,7 +141,12 @@ impl TelegramSource {
             offset: 0,
             transcription,
             storage,
+            allowed_user_ids,
         }
+    }
+
+    fn is_allowed(&self, user_id: Option<i64>) -> bool {
+        user_id.is_some_and(|id| self.allowed_user_ids.contains(&id))
     }
 
     fn method_url(&self, method: &str) -> String {
@@ -184,6 +205,9 @@ impl TelegramSource {
                 self.offset = upd.update_id + 1;
             }
             if let Some(cb) = upd.callback_query {
+                if !self.is_allowed(cb.from.as_ref().map(|u| u.id)) {
+                    continue;
+                }
                 if let Err(e) = confirm::handle_delete_callback(
                     &self.http,
                     &self.base_url,
@@ -198,6 +222,9 @@ impl TelegramSource {
                 continue;
             }
             let Some(msg) = upd.message else { continue };
+            if !self.is_allowed(msg.from.as_ref().map(|u| u.id)) {
+                continue;
+            }
             match parse(&msg) {
                 Parsed::Incoming(im) => out.push(im),
                 Parsed::Voice {
@@ -217,6 +244,7 @@ impl TelegramSource {
                         tracing::warn!(source = %self.slug, error = %e, "reply failed");
                     }
                 }
+                Parsed::Ignored => {}
             }
         }
         out

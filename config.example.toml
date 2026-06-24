@@ -15,9 +15,14 @@ bot_token = "123456:REPLACE_ME"
 # transcription_provider: mistral | openai | none
 transcription_provider = "mistral"
 transcription_token = "sk-REPLACE_ME"
+# Telegram numeric user ids permitted to write to this bot. Fail-closed:
+# an empty or missing list silently drops every incoming message and callback.
+# Inline /command messages are silently dropped regardless of the allowlist.
+allowed_user_ids = [111111111]
 
 [[sources]]
 slug = "thoughts-bot"
 space = "thoughts"
 bot_token = "234567:REPLACE_ME"
 # Voice transcription disabled — provider defaults to "none".
+allowed_user_ids = [111111111, 222222222]

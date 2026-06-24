@@ -39,6 +39,8 @@ pub struct Update {
 pub struct CallbackQuery {
     pub id: String,
     #[serde(default)]
+    pub from: Option<User>,
+    #[serde(default)]
     pub data: Option<String>,
     #[serde(default)]
     pub message: Option<Message>,
@@ -71,6 +73,17 @@ pub struct Message {
     pub sticker: Option<serde_json::Value>,
     #[serde(default)]
     pub animation: Option<serde_json::Value>,
+    #[serde(default)]
+    pub entities: Vec<MessageEntity>,
+    #[serde(default)]
+    pub caption_entities: Vec<MessageEntity>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MessageEntity {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub offset: i64,
 }
 
 #[derive(Debug, Deserialize)]

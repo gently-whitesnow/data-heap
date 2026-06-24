@@ -98,6 +98,49 @@ fn empty_text_is_unsupported_other() {
 }
 
 #[test]
+fn bot_command_text_is_ignored() {
+    let parsed = parse(&base_msg(json!({
+        "text": "/start",
+        "entities": [{ "type": "bot_command", "offset": 0, "length": 6 }]
+    })));
+    assert_eq!(parsed, Parsed::Ignored);
+}
+
+#[test]
+fn bot_command_with_username_is_ignored() {
+    let parsed = parse(&base_msg(json!({
+        "text": "/help@my_bot extra",
+        "entities": [{ "type": "bot_command", "offset": 0, "length": 12 }]
+    })));
+    assert_eq!(parsed, Parsed::Ignored);
+}
+
+#[test]
+fn slash_not_in_entities_is_plain_text() {
+    let parsed = parse(&base_msg(json!({ "text": "/note like a path" })));
+    assert!(matches!(parsed, Parsed::Incoming(_)));
+}
+
+#[test]
+fn command_not_at_offset_zero_is_text() {
+    let parsed = parse(&base_msg(json!({
+        "text": "see /help",
+        "entities": [{ "type": "bot_command", "offset": 4, "length": 5 }]
+    })));
+    assert!(matches!(parsed, Parsed::Incoming(_)));
+}
+
+#[test]
+fn caption_bot_command_is_ignored() {
+    let parsed = parse(&base_msg(json!({
+        "photo": [{ "file_id": "x" }],
+        "caption": "/start",
+        "caption_entities": [{ "type": "bot_command", "offset": 0, "length": 6 }]
+    })));
+    assert_eq!(parsed, Parsed::Ignored);
+}
+
+#[test]
 fn unknown_message_kind_is_unsupported_other() {
     let parsed = parse(&base_msg(json!({})));
     assert_eq!(parsed, Parsed::Unsupported(UNSUPPORTED_OTHER));

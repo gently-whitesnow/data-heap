@@ -4,7 +4,13 @@
 
 use crate::domain::ports::{IncomingMessage, IncomingPayload};
 
-use super::api::Message;
+use super::api::{Message, MessageEntity};
+
+fn is_bot_command(entities: &[MessageEntity]) -> bool {
+    entities
+        .iter()
+        .any(|e| e.kind == "bot_command" && e.offset == 0)
+}
 
 /// What the polling loop should do with a parsed Telegram message.
 #[derive(Debug, PartialEq, Eq)]
@@ -21,6 +27,8 @@ pub enum Parsed {
     },
     /// Type we don't yet support; the bot must reply in chat with this reason.
     Unsupported(&'static str),
+    /// Message must be dropped without any reply (e.g. `/cmd` invocations).
+    Ignored,
 }
 
 /// Common Telegram-side fields shared by all parsed variants — extracted up
@@ -57,6 +65,9 @@ pub const UNSUPPORTED_VIDEO_NOTE: &str =
 pub const UNSUPPORTED_OTHER: &str = "Этот тип сообщения не поддержан; пришли текст.";
 
 pub fn parse(msg: &Message) -> Parsed {
+    if is_bot_command(&msg.entities) || is_bot_command(&msg.caption_entities) {
+        return Parsed::Ignored;
+    }
     if let Some(text) = msg.text.as_ref().filter(|s| !s.trim().is_empty()) {
         return Parsed::Incoming(skeleton(msg).into_incoming(IncomingPayload::Text(text.clone())));
     }
