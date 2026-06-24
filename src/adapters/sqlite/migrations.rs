@@ -4,7 +4,10 @@ use crate::domain::error::{Error, Result};
 
 /// Ordered migration list. Index + 1 is the schema version a migration brings
 /// the database to; `PRAGMA user_version` tracks the applied version.
-const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/0001_init.sql"),
+    include_str!("migrations/0002_items_tombstone.sql"),
+];
 
 /// Apply every migration not yet reflected in `user_version`. Idempotent.
 pub fn run(conn: &Connection) -> Result<()> {

@@ -9,7 +9,7 @@ use crate::adapters::transcription;
 use crate::adapters::TelegramSource;
 use crate::config::{Config, SourceConfig};
 use crate::domain::error::Result;
-use crate::domain::ports::{IngestionSource, Storage};
+use crate::domain::ports::{IncomingMessage, IngestionSource, Storage};
 use crate::domain::source::Space;
 
 /// Cool-down after a poll error before retrying — keeps a flaky network or
@@ -25,7 +25,7 @@ pub async fn run(config: Config, storage: Arc<dyn Storage>) {
     tracing::info!(sources = config.sources.len(), "polling loop starting");
     let mut handles = Vec::new();
     for src in &config.sources {
-        match build_source(src) {
+        match build_source(src, storage.clone()) {
             Ok(adapter) => {
                 let storage = storage.clone();
                 handles.push(tokio::spawn(run_source(adapter, storage)));
@@ -40,7 +40,7 @@ pub async fn run(config: Config, storage: Arc<dyn Storage>) {
     }
 }
 
-fn build_source(src: &SourceConfig) -> Result<Box<dyn IngestionSource>> {
+fn build_source(src: &SourceConfig, storage: Arc<dyn Storage>) -> Result<Box<dyn IngestionSource>> {
     let transcription = transcription::build(
         src.transcription_provider,
         src.transcription_token.as_deref(),
@@ -50,6 +50,7 @@ fn build_source(src: &SourceConfig) -> Result<Box<dyn IngestionSource>> {
         Space::new(src.space.clone()),
         &src.bot_token,
         transcription,
+        storage,
     )?;
     Ok(Box::new(adapter))
 }
@@ -60,7 +61,7 @@ async fn run_source(mut source: Box<dyn IngestionSource>, storage: Arc<dyn Stora
     loop {
         match source.poll().await {
             Ok(messages) => {
-                if let Err(e) = persist_batch(source.as_ref(), &messages, storage.as_ref()) {
+                if let Err(e) = persist_batch(source.as_ref(), &messages, storage.as_ref()).await {
                     tracing::error!(source = %slug, error = %e, "persist batch failed");
                 }
             }
@@ -72,9 +73,9 @@ async fn run_source(mut source: Box<dyn IngestionSource>, storage: Arc<dyn Stora
     }
 }
 
-fn persist_batch(
+async fn persist_batch(
     source: &dyn IngestionSource,
-    messages: &[crate::domain::ports::IncomingMessage],
+    messages: &[IncomingMessage],
     storage: &dyn Storage,
 ) -> Result<()> {
     for msg in messages {
@@ -90,6 +91,14 @@ fn persist_batch(
             kind = item.kind.as_str(),
             "item stored"
         );
+        if let Err(e) = source.confirm_saved(msg, id).await {
+            tracing::warn!(
+                source = source.slug(),
+                item_id = %id,
+                error = %e,
+                "confirm_saved failed"
+            );
+        }
     }
     Ok(())
 }

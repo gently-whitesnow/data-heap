@@ -20,6 +20,17 @@ pub struct Update {
     pub update_id: i64,
     #[serde(default)]
     pub message: Option<Message>,
+    #[serde(default)]
+    pub callback_query: Option<CallbackQuery>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CallbackQuery {
+    pub id: String,
+    #[serde(default)]
+    pub data: Option<String>,
+    #[serde(default)]
+    pub message: Option<Message>,
 }
 
 #[derive(Debug, Deserialize)]
