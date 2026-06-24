@@ -1,100 +1,114 @@
-//! Synchronous SQL operations used by the async [`Storage`] impl.
-//!
-//! Each function takes a `&Connection` and runs inside `spawn_blocking` —
-//! that's why this module never touches `tokio` or `async_trait`.
+//! Async SQL operations behind the [`Storage`](crate::domain::ports::Storage)
+//! impl. Each function takes a `&Pool<Sqlite>` (or a transaction) and runs
+//! its statements with `sqlx` — no blocking calls, no `spawn_blocking`.
 
-use rusqlite::{Connection, OptionalExtension};
+use sqlx::{Pool, Sqlite, Transaction};
 
 use crate::domain::error::Result;
 use crate::domain::item::{Item, ItemId, NewItem};
 use crate::domain::source::{Source, Space};
 
-use super::mapping;
+use super::mapping::{self, ItemRow};
 
-pub fn upsert_source(conn: &Connection, source: &Source) -> Result<()> {
-    conn.execute(
+pub async fn upsert_source(pool: &Pool<Sqlite>, source: &Source) -> Result<()> {
+    sqlx::query(
         "INSERT INTO sources (slug, space)
          VALUES (?1, ?2)
          ON CONFLICT(slug) DO UPDATE SET space = excluded.space",
-        rusqlite::params![source.slug, source.space.as_str()],
-    )?;
+    )
+    .bind(&source.slug)
+    .bind(source.space.as_str())
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
-pub fn list_sources(conn: &Connection) -> Result<Vec<Source>> {
-    let mut stmt = conn.prepare("SELECT slug, space FROM sources ORDER BY slug")?;
-    let rows = stmt.query_map([], |row| {
-        Ok(Source {
-            slug: row.get(0)?,
-            space: Space::new(row.get::<_, String>(1)?),
+pub async fn list_sources(pool: &Pool<Sqlite>) -> Result<Vec<Source>> {
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT slug, space FROM sources ORDER BY slug")
+            .fetch_all(pool)
+            .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(slug, space)| Source {
+            slug,
+            space: Space::new(space),
         })
-    })?;
-    let mut sources = Vec::new();
-    for row in rows {
-        sources.push(row?);
-    }
-    Ok(sources)
+        .collect())
 }
 
-pub fn insert_item(conn: &Connection, item: &NewItem, now: i64) -> Result<ItemId> {
+pub async fn insert_item(pool: &Pool<Sqlite>, item: &NewItem, now: i64) -> Result<ItemId> {
+    let mut tx = pool.begin().await?;
+    let id = insert_item_tx(&mut tx, item, now).await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+pub async fn insert_items(pool: &Pool<Sqlite>, items: &[NewItem], now: i64) -> Result<Vec<ItemId>> {
+    let mut tx = pool.begin().await?;
+    let mut ids = Vec::with_capacity(items.len());
+    for item in items {
+        ids.push(insert_item_tx(&mut tx, item, now).await?);
+    }
+    tx.commit().await?;
+    Ok(ids)
+}
+
+// A txn-scoped insert keeps the `INSERT … ON CONFLICT DO NOTHING` + dedup
+// `SELECT id` atomic, so a concurrent insert on the same telegram message
+// cannot slip a different id between the two statements.
+async fn insert_item_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    item: &NewItem,
+    now: i64,
+) -> Result<ItemId> {
     let extra = mapping::extra_json(&item.telegram)?;
-    // Dedup on the Telegram message address: a repeated polling update is a
-    // no-op that returns the id of the already-stored item.
-    let inserted = conn.execute(
+    let res = sqlx::query(
         "INSERT INTO items
                 (source, space, kind, text, chat_id, message_id, telegram_extra, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(chat_id, message_id) DO NOTHING",
-        rusqlite::params![
-            item.source,
-            item.space.as_str(),
-            item.kind.as_str(),
-            item.text,
-            item.telegram.chat_id,
-            item.telegram.message_id,
-            extra,
-            now,
-        ],
-    )?;
-    if inserted > 0 {
-        return Ok(ItemId(conn.last_insert_rowid()));
+    )
+    .bind(&item.source)
+    .bind(item.space.as_str())
+    .bind(item.kind.as_str())
+    .bind(&item.text)
+    .bind(item.telegram.chat_id)
+    .bind(item.telegram.message_id)
+    .bind(&extra)
+    .bind(now)
+    .execute(&mut **tx)
+    .await?;
+
+    if res.rows_affected() > 0 {
+        return Ok(ItemId(res.last_insert_rowid()));
     }
-    let id = conn.query_row(
-        "SELECT id FROM items WHERE chat_id = ?1 AND message_id = ?2",
-        rusqlite::params![item.telegram.chat_id, item.telegram.message_id],
-        |row| row.get::<_, i64>(0),
-    )?;
+    let id: i64 = sqlx::query_scalar("SELECT id FROM items WHERE chat_id = ?1 AND message_id = ?2")
+        .bind(item.telegram.chat_id)
+        .bind(item.telegram.message_id)
+        .fetch_one(&mut **tx)
+        .await?;
     Ok(ItemId(id))
 }
 
-pub fn insert_items(conn: &mut Connection, items: &[NewItem], now: i64) -> Result<Vec<ItemId>> {
-    let tx = conn.transaction()?;
-    let mut ids = Vec::with_capacity(items.len());
-    for item in items {
-        ids.push(insert_item(&tx, item, now)?);
-    }
-    tx.commit()?;
-    Ok(ids)
-}
-
-pub fn get_item(conn: &Connection, id: ItemId) -> Result<Option<Item>> {
-    conn.query_row(
+pub async fn get_item(pool: &Pool<Sqlite>, id: ItemId) -> Result<Option<Item>> {
+    let row: Option<ItemRow> = sqlx::query_as(
         "SELECT id, source, space, kind, text, chat_id, message_id, telegram_extra, created_at
          FROM items WHERE id = ?1 AND deleted_at IS NULL",
-        [id.0],
-        mapping::row_to_item,
     )
-    .optional()?
-    .transpose()
+    .bind(id.0)
+    .fetch_optional(pool)
+    .await?;
+    row.map(mapping::into_item).transpose()
 }
 
-pub fn fetch_unprocessed(
-    conn: &Connection,
+pub async fn fetch_unprocessed(
+    pool: &Pool<Sqlite>,
     agent_slug: &str,
     space: &str,
     limit: u32,
 ) -> Result<Vec<Item>> {
-    let mut stmt = conn.prepare(
+    let rows: Vec<ItemRow> = sqlx::query_as(
         "SELECT i.id, i.source, i.space, i.kind, i.text,
                 i.chat_id, i.message_id, i.telegram_extra, i.created_at
          FROM items i
@@ -106,33 +120,42 @@ pub fn fetch_unprocessed(
            )
          ORDER BY i.id ASC
          LIMIT ?3",
-    )?;
-    let rows = stmt.query_map(
-        rusqlite::params![space, agent_slug, limit],
-        mapping::row_to_item,
-    )?;
-    let mut items = Vec::new();
-    for row in rows {
-        items.push(row??);
-    }
-    Ok(items)
+    )
+    .bind(space)
+    .bind(agent_slug)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter().map(mapping::into_item).collect()
 }
 
-pub fn mark_processed(conn: &Connection, agent_slug: &str, item_id: ItemId, now: i64) -> Result<()> {
-    conn.execute(
+pub async fn mark_processed(
+    pool: &Pool<Sqlite>,
+    agent_slug: &str,
+    item_id: ItemId,
+    now: i64,
+) -> Result<()> {
+    sqlx::query(
         "INSERT INTO processed_marks (agent_slug, item_id, processed_at)
          VALUES (?1, ?2, ?3)
          ON CONFLICT(agent_slug, item_id) DO NOTHING",
-        rusqlite::params![agent_slug, item_id.0, now],
-    )?;
+    )
+    .bind(agent_slug)
+    .bind(item_id.0)
+    .bind(now)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
-pub fn delete_item(conn: &Connection, item_id: ItemId, now: i64) -> Result<()> {
-    conn.execute(
+pub async fn delete_item(pool: &Pool<Sqlite>, item_id: ItemId, now: i64) -> Result<()> {
+    sqlx::query(
         "UPDATE items SET deleted_at = ?1
          WHERE id = ?2 AND deleted_at IS NULL",
-        rusqlite::params![now, item_id.0],
-    )?;
+    )
+    .bind(now)
+    .bind(item_id.0)
+    .execute(pool)
+    .await?;
     Ok(())
 }
