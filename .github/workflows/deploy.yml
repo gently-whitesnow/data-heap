@@ -93,8 +93,14 @@ jobs:
         run: |
           REL="${BASE}/releases/${GITHUB_SHA}"
           SSH="ssh -i ~/.ssh/id ${SSH_USER}@${HOST}"
-          $SSH "mkdir -p '${REL}'"
-          rsync -az --delete -e "ssh -i ~/.ssh/id" out/ "${SSH_USER}@${HOST}:${REL}/"
+          # Релиз-каталог должен быть проходим по группе data-heap: сервисный юзер
+          # читает config.toml по группе. Родитель releases — setgid (см. роль в
+          # инфра-репо), поэтому группа наследуется; явный chmod 2750 выставляет
+          # rwx-биты, которые mkdir мог срезать по umask (иначе group r-x теряется).
+          $SSH "mkdir -p '${REL}' && chmod 2750 '${REL}'"
+          # Без -o/-g: группу задаёт setgid родителя (data-heap), а не группа раннера;
+          # -p сохраняет режимы (config 0640, бинарь 0755).
+          rsync -rlptz --delete -e "ssh -i ~/.ssh/id" out/ "${SSH_USER}@${HOST}:${REL}/"
           $SSH "ln -sfn '${REL}' '${BASE}/current'"
           $SSH "ls -1dt ${BASE}/releases/*/ | tail -n +$((KEEP_RELEASES + 1)) | xargs -r rm -rf"
           $SSH "sudo systemctl restart data-heap.service"
