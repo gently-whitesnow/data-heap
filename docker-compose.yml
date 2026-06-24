@@ -1,0 +1,20 @@
+services:
+  data-heap:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: data-heap
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:28080:8080"
+    volumes:
+      - data-heap-db:/data
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      HTTP_ADDR: 0.0.0.0:8080
+      DB_PATH: /data/data-heap.sqlite
+
+volumes:
+  data-heap-db:

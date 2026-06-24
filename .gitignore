@@ -3,3 +3,4 @@ config.toml
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+.env
