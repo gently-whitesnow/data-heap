@@ -14,7 +14,7 @@ http_addr = "127.0.0.1:8080"
 slug = "expenses-bot"
 space = "expenses"
 bot_token = "123456:REPLACE_ME"
-# transcription_provider: mistral | openai | local_whisper | none
+# transcription_provider: mistral | openai | none
 transcription_provider = "mistral"
 transcription_token = "sk-REPLACE_ME"
 

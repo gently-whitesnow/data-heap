@@ -34,7 +34,6 @@ impl std::fmt::Display for Space {
 pub enum TranscriptionProvider {
     Mistral,
     Openai,
-    LocalWhisper,
     #[default]
     None,
 }
@@ -44,7 +43,6 @@ impl TranscriptionProvider {
         match self {
             TranscriptionProvider::Mistral => "mistral",
             TranscriptionProvider::Openai => "openai",
-            TranscriptionProvider::LocalWhisper => "local_whisper",
             TranscriptionProvider::None => "none",
         }
     }

@@ -92,11 +92,10 @@ impl Config {
                     src.slug
                 )));
             }
-            let needs_token = !matches!(src.transcription_provider, TranscriptionProvider::None)
-                && !matches!(
-                    src.transcription_provider,
-                    TranscriptionProvider::LocalWhisper
-                );
+            let needs_token = matches!(
+                src.transcription_provider,
+                TranscriptionProvider::Mistral | TranscriptionProvider::Openai
+            );
             if needs_token
                 && src
                     .transcription_token

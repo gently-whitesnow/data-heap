@@ -37,6 +37,10 @@ pub enum IncomingPayload {
     Text(String),
     /// Caption attached to a non-text message (photo/video/document).
     Caption(String),
+    /// Transcript of a voice message. The adapter has already downloaded the
+    /// audio, run it through [`Transcription`], and deleted the temp file —
+    /// the daemon only sees the resulting text.
+    Voice(String),
 }
 
 /// A message pulled from an ingestion source, ready to be classified and stored.
@@ -65,6 +69,7 @@ impl IncomingMessage {
                 (kind, t)
             }
             IncomingPayload::Caption(t) => (ItemKind::Caption, t),
+            IncomingPayload::Voice(t) => (ItemKind::Voice, t),
         };
         NewItem {
             source,
@@ -102,9 +107,17 @@ pub trait IngestionSource: Send {
     async fn poll(&mut self) -> Result<Vec<IncomingMessage>>;
 }
 
-/// Speech-to-text port. No adapter in this slice.
+/// Speech-to-text port. Implementations live behind a provider switch in
+/// [`crate::adapters::transcription`]; the Telegram adapter calls this after
+/// downloading a voice file and discards the bytes immediately after the call
+/// returns (success or error).
+///
+/// `filename` is a hint for the provider: hosted APIs (OpenAI, Mistral) detect
+/// the audio container from the extension during multipart upload, so passing
+/// the original Telegram file name (e.g. `voice.oga`) matters.
+#[async_trait]
 pub trait Transcription: Send + Sync {
-    fn transcribe(&self, audio: &[u8]) -> Result<String>;
+    async fn transcribe(&self, audio: &[u8], filename: &str) -> Result<String>;
 }
 
 #[cfg(test)]
@@ -158,5 +171,16 @@ mod tests {
     fn plain_text_classifies_as_text() {
         let item = payload_text("buy milk").into_new_item("bot".into(), Space::new("x"));
         assert_eq!(item.kind, ItemKind::Text);
+    }
+
+    #[test]
+    fn voice_payload_classifies_as_voice() {
+        let msg = IncomingMessage {
+            payload: IncomingPayload::Voice("hello from audio".into()),
+            ..payload_text("")
+        };
+        let item = msg.into_new_item("bot".into(), Space::new("inbox"));
+        assert_eq!(item.kind, ItemKind::Voice);
+        assert_eq!(item.text, "hello from audio");
     }
 }

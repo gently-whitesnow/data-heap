@@ -76,13 +76,16 @@ transcription_provider = "openai"
 }
 
 #[test]
-fn local_whisper_needs_no_token() {
+fn none_provider_needs_no_token() {
     let raw = r#"
 [[sources]]
 slug = "voice"
 space = "inbox"
 bot_token = "1:A"
-transcription_provider = "local_whisper"
 "#;
-    assert!(Config::from_toml(raw).is_ok());
+    let cfg = Config::from_toml(raw).expect("none provider is default and needs no token");
+    assert_eq!(
+        cfg.sources[0].transcription_provider,
+        TranscriptionProvider::None
+    );
 }
