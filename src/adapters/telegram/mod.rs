@@ -170,7 +170,9 @@ impl TelegramSource {
                 resp.description.unwrap_or_else(|| "unknown error".into())
             )));
         }
-        Ok(PollOutcome::Batch(self.handle_updates(resp.result.unwrap_or_default()).await))
+        Ok(PollOutcome::Batch(
+            self.handle_updates(resp.result.unwrap_or_default()).await,
+        ))
     }
 
     async fn handle_updates(&mut self, updates: Vec<Update>) -> Vec<IncomingMessage> {
