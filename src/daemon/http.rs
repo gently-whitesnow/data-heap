@@ -10,6 +10,7 @@
 //!   across agents.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     extract::{Query, State},
@@ -19,39 +20,63 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
+use tower_http::{
+    limit::RequestBodyLimitLayer, timeout::TimeoutLayer, trace::TraceLayer,
+};
 
-use crate::config::Config;
 use crate::domain::error::Error;
 use crate::domain::item::{Item, ItemId, ItemKind, TelegramMetadata};
 use crate::domain::ports::Storage;
+use crate::domain::source::Space;
 
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 500;
 
-/// Bind to `config.daemon.http_addr` and serve until the daemon shuts down.
-/// A bind failure is logged and the task idles — the polling loop keeps
-/// running so we don't lose ingestion just because the port is busy.
-pub async fn run(config: Config, storage: Arc<dyn Storage>) {
-    let addr = config.daemon.http_addr.clone();
-    let listener = match tokio::net::TcpListener::bind(&addr).await {
+/// Per-request timeout. Keeps a wedged storage call from holding a connection
+/// open indefinitely; agents that need long-running operations should poll.
+const REQUEST_TIMEOUT_SECS: u64 = 30;
+
+/// Body cap for `POST /v1/items/processed` and similar control endpoints.
+/// 16 KiB is generous for `{agent_slug, item_id}` payloads.
+const REQUEST_BODY_LIMIT_BYTES: usize = 16 * 1024;
+
+/// Bind to `http_addr` and serve until `shutdown` fires. A bind failure is
+/// logged and the task idles — the polling loop keeps running so we don't
+/// lose ingestion just because the port is busy.
+pub async fn run(http_addr: String, storage: Arc<dyn Storage>, shutdown: CancellationToken) {
+    let listener = match tokio::net::TcpListener::bind(&http_addr).await {
         Ok(l) => l,
         Err(e) => {
-            tracing::error!(addr = %addr, error = %e, "failed to bind HTTP API");
-            std::future::pending::<()>().await;
+            tracing::error!(addr = %http_addr, error = %e, "failed to bind HTTP API");
+            shutdown.cancelled().await;
             return;
         }
     };
-    tracing::info!(addr = %addr, "HTTP API listening");
-    if let Err(e) = axum::serve(listener, router(storage)).await {
+    tracing::info!(addr = %http_addr, "HTTP API listening");
+    let shutdown_signal = {
+        let shutdown = shutdown.clone();
+        async move { shutdown.cancelled().await }
+    };
+    if let Err(e) = axum::serve(listener, router(storage))
+        .with_graceful_shutdown(shutdown_signal)
+        .await
+    {
         tracing::error!(error = %e, "HTTP server stopped");
     }
 }
 
-fn router(storage: Arc<dyn Storage>) -> Router {
+pub(crate) fn router(storage: Arc<dyn Storage>) -> Router {
     Router::new()
         .route("/v1/items", get(list_items))
         .route("/v1/items/processed", post(mark_processed))
         .with_state(storage)
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::GATEWAY_TIMEOUT,
+            Duration::from_secs(REQUEST_TIMEOUT_SECS),
+        ))
+        .layer(RequestBodyLimitLayer::new(REQUEST_BODY_LIMIT_BYTES))
+        .layer(TraceLayer::new_for_http())
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,10 +117,12 @@ async fn list_items(
     Query(q): Query<ListItemsQuery>,
 ) -> Result<Json<Vec<ItemDto>>, ApiError> {
     let agent_slug = require_field(&q.agent_slug, "agent_slug")?;
-    let space = require_field(&q.space, "space")?;
+    let space_raw = require_field(&q.space, "space")?;
+    let space = Space::new(space_raw.to_owned());
     let limit = q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let items = storage
-        .fetch_unprocessed(agent_slug, space, limit)
+        .fetch_unprocessed(agent_slug, &space, limit)
+        .await
         .map_err(ApiError::storage)?;
     Ok(Json(items.into_iter().map(ItemDto::from).collect()))
 }
@@ -113,6 +140,7 @@ async fn mark_processed(
     let agent_slug = require_field(&body.agent_slug, "agent_slug")?;
     storage
         .mark_processed(agent_slug, body.item_id)
+        .await
         .map_err(ApiError::storage)?;
     Ok(StatusCode::NO_CONTENT)
 }

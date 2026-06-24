@@ -2,11 +2,12 @@
 //! [`IngestionSource`](crate::domain::ports::IngestionSource) port.
 //!
 //! One adapter instance = one bot = one space (pinned at construction). The
-//! adapter is fully self-contained: it owns the HTTP client, holds the
-//! `update_id` offset between polls, downloads and transcribes voice messages
-//! through an optional [`Transcription`] port, replies in chat to unsupported
-//! or failed message kinds, and handles the slice-3.5 save-confirmation +
-//! inline-delete callback flow against a [`Storage`] reference.
+//! adapter owns no HTTP client of its own — it borrows the daemon-wide one
+//! — holds the `update_id` offset between polls, downloads and transcribes
+//! voice messages through an optional [`Transcription`] port, replies in chat
+//! to unsupported or failed message kinds, and handles the slice-3.5
+//! save-confirmation + inline-delete callback flow against a [`Storage`]
+//! reference.
 
 mod api;
 mod confirm;
@@ -18,6 +19,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::Client;
+use secrecy::{ExposeSecret, SecretString};
 use serde_json::json;
 
 use crate::domain::error::{Error, Result};
@@ -32,10 +34,7 @@ use self::parse::{parse, MessageSkeleton, Parsed};
 
 /// Telegram long-poll timeout, seconds. Server holds the request up to this
 /// long when there are no updates; keep below typical HTTP/proxy idle limits.
-const LONG_POLL_SECS: u64 = 25;
-
-/// HTTP request timeout — long-poll seconds plus headroom for the response.
-const HTTP_TIMEOUT_SECS: u64 = LONG_POLL_SECS + 10;
+pub(crate) const LONG_POLL_SECS: u64 = 25;
 
 /// Telegram Bot API base. Pulled out so tests can point at a mock server.
 const DEFAULT_BASE_URL: &str = "https://api.telegram.org";
@@ -46,10 +45,19 @@ const DEFAULT_BASE_URL: &str = "https://api.telegram.org";
 const VOICE_DISABLED: &str =
     "Транскрибация голосовых для этого бота отключена в конфиге (provider = \"none\").";
 
+/// Polling result with optional cool-down hint from the server (429
+/// `retry_after`). The polling loop honours `retry_after` before its own
+/// backoff so we don't keep banging on a rate-limited endpoint.
+#[derive(Debug)]
+pub enum PollOutcome {
+    Batch(Vec<IncomingMessage>),
+    RetryAfter(Duration),
+}
+
 pub struct TelegramSource {
     slug: String,
     space: Space,
-    token: String,
+    token: SecretString,
     base_url: String,
     http: Client,
     offset: i64,
@@ -57,55 +65,79 @@ pub struct TelegramSource {
     storage: Arc<dyn Storage>,
 }
 
+impl std::fmt::Debug for TelegramSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelegramSource")
+            .field("slug", &self.slug)
+            .field("space", &self.space)
+            .field("base_url", &self.base_url)
+            .field("token", &"<redacted>")
+            .field("offset", &self.offset)
+            .finish_non_exhaustive()
+    }
+}
+
 impl TelegramSource {
     pub fn new(
         slug: impl Into<String>,
         space: Space,
-        token: impl Into<String>,
+        token: SecretString,
+        http: Client,
         storage: Arc<dyn Storage>,
-    ) -> Result<Self> {
-        Self::with_base_url(slug, space, token, DEFAULT_BASE_URL, None, storage)
+    ) -> Self {
+        Self::with_base_url(slug, space, token, DEFAULT_BASE_URL, None, http, storage)
     }
 
     pub fn with_transcription(
         slug: impl Into<String>,
         space: Space,
-        token: impl Into<String>,
+        token: SecretString,
         transcription: Option<Arc<dyn Transcription>>,
+        http: Client,
         storage: Arc<dyn Storage>,
-    ) -> Result<Self> {
-        Self::with_base_url(slug, space, token, DEFAULT_BASE_URL, transcription, storage)
+    ) -> Self {
+        Self::with_base_url(
+            slug,
+            space,
+            token,
+            DEFAULT_BASE_URL,
+            transcription,
+            http,
+            storage,
+        )
     }
 
     pub fn with_base_url(
         slug: impl Into<String>,
         space: Space,
-        token: impl Into<String>,
+        token: SecretString,
         base_url: impl Into<String>,
         transcription: Option<Arc<dyn Transcription>>,
+        http: Client,
         storage: Arc<dyn Storage>,
-    ) -> Result<Self> {
-        let http = Client::builder()
-            .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
-            .build()
-            .map_err(|e| Error::Storage(format!("http client init: {e}")))?;
-        Ok(TelegramSource {
+    ) -> Self {
+        TelegramSource {
             slug: slug.into(),
             space,
-            token: token.into(),
+            token,
             base_url: base_url.into(),
             http,
             offset: 0,
             transcription,
             storage,
-        })
+        }
     }
 
     fn method_url(&self, method: &str) -> String {
-        format!("{}/bot{}/{}", self.base_url, self.token, method)
+        format!(
+            "{}/bot{}/{}",
+            self.base_url,
+            self.token.expose_secret(),
+            method
+        )
     }
 
-    async fn get_updates(&self) -> Result<Vec<Update>> {
+    async fn get_updates(&mut self) -> Result<PollOutcome> {
         let body = json!({
             "offset": self.offset,
             "timeout": LONG_POLL_SECS,
@@ -116,18 +148,76 @@ impl TelegramSource {
             .post(self.method_url("getUpdates"))
             .json(&body)
             .send()
-            .await
-            .map_err(|e| Error::Storage(format!("telegram getUpdates: {e}")))?
+            .await?
             .json()
-            .await
-            .map_err(|e| Error::Storage(format!("telegram getUpdates decode: {e}")))?;
+            .await?;
         if !resp.ok {
-            return Err(Error::Storage(format!(
-                "telegram getUpdates: {}",
+            if let Some(retry) = resp
+                .parameters
+                .as_ref()
+                .and_then(|p| p.retry_after)
+                .filter(|s| *s > 0)
+            {
+                tracing::warn!(
+                    source = %self.slug,
+                    retry_after = retry,
+                    "telegram getUpdates rate-limited"
+                );
+                return Ok(PollOutcome::RetryAfter(Duration::from_secs(retry)));
+            }
+            return Err(Error::Telegram(format!(
+                "getUpdates: {}",
                 resp.description.unwrap_or_else(|| "unknown error".into())
             )));
         }
-        Ok(resp.result.unwrap_or_default())
+        Ok(PollOutcome::Batch(self.handle_updates(resp.result.unwrap_or_default()).await))
+    }
+
+    async fn handle_updates(&mut self, updates: Vec<Update>) -> Vec<IncomingMessage> {
+        let mut out = Vec::new();
+        for upd in updates {
+            // Advance offset even for updates we drop, otherwise getUpdates
+            // would redeliver them forever.
+            if upd.update_id >= self.offset {
+                self.offset = upd.update_id + 1;
+            }
+            if let Some(cb) = upd.callback_query {
+                if let Err(e) = confirm::handle_delete_callback(
+                    &self.http,
+                    &self.base_url,
+                    &self.token,
+                    self.storage.as_ref(),
+                    &cb,
+                )
+                .await
+                {
+                    tracing::warn!(source = %self.slug, error = %e, "callback_query handling failed");
+                }
+                continue;
+            }
+            let Some(msg) = upd.message else { continue };
+            match parse(&msg) {
+                Parsed::Incoming(im) => out.push(im),
+                Parsed::Voice {
+                    file_id,
+                    mime_type,
+                    skeleton,
+                } => {
+                    if let Some(im) = self
+                        .handle_voice(&msg, &file_id, mime_type.as_deref(), skeleton)
+                        .await
+                    {
+                        out.push(im);
+                    }
+                }
+                Parsed::Unsupported(reason) => {
+                    if let Err(e) = self.send_reply(&msg, reason).await {
+                        tracing::warn!(source = %self.slug, error = %e, "reply failed");
+                    }
+                }
+            }
+        }
+        out
     }
 
     async fn send_reply(&self, msg: &Message, text: &str) -> Result<()> {
@@ -141,11 +231,9 @@ impl TelegramSource {
             .post(self.method_url("sendMessage"))
             .json(&body)
             .send()
-            .await
-            .map_err(|e| Error::Storage(format!("telegram sendMessage: {e}")))?
+            .await?
             .json()
-            .await
-            .map_err(|e| Error::Storage(format!("telegram sendMessage decode: {e}")))?;
+            .await?;
         if !resp.ok {
             // Don't fail the whole poll because a single reply bounced (user
             // blocked the bot, etc.); the dedup index will keep us idempotent
@@ -199,6 +287,11 @@ impl TelegramSource {
             }
         }
     }
+
+    /// Poll variant exposing the rate-limit hint to the caller.
+    pub async fn poll_outcome(&mut self) -> Result<PollOutcome> {
+        self.get_updates().await
+    }
 }
 
 #[async_trait]
@@ -212,51 +305,16 @@ impl IngestionSource for TelegramSource {
     }
 
     async fn poll(&mut self) -> Result<Vec<IncomingMessage>> {
-        let updates = self.get_updates().await?;
-        let mut out = Vec::new();
-        for upd in updates {
-            // Advance offset even for updates we drop, otherwise getUpdates
-            // would redeliver them forever.
-            if upd.update_id >= self.offset {
-                self.offset = upd.update_id + 1;
-            }
-            if let Some(cb) = upd.callback_query {
-                if let Err(e) = confirm::handle_delete_callback(
-                    &self.http,
-                    &self.base_url,
-                    &self.token,
-                    self.storage.as_ref(),
-                    &cb,
-                )
-                .await
-                {
-                    tracing::warn!(source = %self.slug, error = %e, "callback_query handling failed");
-                }
-                continue;
-            }
-            let Some(msg) = upd.message else { continue };
-            match parse(&msg) {
-                Parsed::Incoming(im) => out.push(im),
-                Parsed::Voice {
-                    file_id,
-                    mime_type,
-                    skeleton,
-                } => {
-                    if let Some(im) = self
-                        .handle_voice(&msg, &file_id, mime_type.as_deref(), skeleton)
-                        .await
-                    {
-                        out.push(im);
-                    }
-                }
-                Parsed::Unsupported(reason) => {
-                    if let Err(e) = self.send_reply(&msg, reason).await {
-                        tracing::warn!(source = %self.slug, error = %e, "reply failed");
-                    }
-                }
+        match self.poll_outcome().await? {
+            PollOutcome::Batch(b) => Ok(b),
+            // Surface the rate-limit as an empty batch — the polling loop in
+            // the daemon uses `poll_outcome` directly when wired by config,
+            // but generic consumers still get backoff via Result<Vec<…>>.
+            PollOutcome::RetryAfter(d) => {
+                tokio::time::sleep(d).await;
+                Ok(Vec::new())
             }
         }
-        Ok(out)
     }
 
     async fn confirm_saved(&self, message: &IncomingMessage, item_id: ItemId) -> Result<()> {

@@ -5,13 +5,13 @@
 //! and optional `language=<code>`; the response is JSON `{ "text": "..." }`.
 //! One adapter parameterised by URL+model covers both.
 
-use std::time::Duration;
-
 use async_trait::async_trait;
+use bytes::Bytes;
 use reqwest::{
     multipart::{Form, Part},
     Client,
 };
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
 use crate::domain::error::{Error, Result};
@@ -28,44 +28,46 @@ const MISTRAL_MODEL: &str = "voxtral-mini-2602";
 /// decoding when the audio doesn't match the hint.
 const LANGUAGE: &str = "ru";
 
-/// Transcription request/response timeout. Voice messages are short (≤20 MB
-/// per Telegram limit), but providers can be slow on cold starts.
-const HTTP_TIMEOUT_SECS: u64 = 60;
-
 pub struct Hosted {
     endpoint: &'static str,
     model: &'static str,
-    token: String,
+    token: SecretString,
     http: Client,
 }
 
+impl std::fmt::Debug for Hosted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Hosted")
+            .field("endpoint", &self.endpoint)
+            .field("model", &self.model)
+            .field("token", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
 impl Hosted {
-    pub fn openai(token: impl Into<String>) -> Result<Self> {
-        Self::new(OPENAI_URL, OPENAI_MODEL, token)
+    pub fn openai(http: Client, token: SecretString) -> Self {
+        Self::new(OPENAI_URL, OPENAI_MODEL, http, token)
     }
 
-    pub fn mistral(token: impl Into<String>) -> Result<Self> {
-        Self::new(MISTRAL_URL, MISTRAL_MODEL, token)
+    pub fn mistral(http: Client, token: SecretString) -> Self {
+        Self::new(MISTRAL_URL, MISTRAL_MODEL, http, token)
     }
 
-    fn new(endpoint: &'static str, model: &'static str, token: impl Into<String>) -> Result<Self> {
-        let http = Client::builder()
-            .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
-            .build()
-            .map_err(|e| Error::Transcription(format!("http client init: {e}")))?;
-        Ok(Hosted {
+    fn new(endpoint: &'static str, model: &'static str, http: Client, token: SecretString) -> Self {
+        Hosted {
             endpoint,
             model,
-            token: token.into(),
+            token,
             http,
-        })
+        }
     }
 }
 
 #[async_trait]
 impl Transcription for Hosted {
-    async fn transcribe(&self, audio: &[u8], filename: &str) -> Result<String> {
-        let part = Part::bytes(audio.to_vec())
+    async fn transcribe(&self, audio: Bytes, filename: &str) -> Result<String> {
+        let part = Part::stream(audio)
             .file_name(filename.to_string())
             .mime_str("application/octet-stream")
             .map_err(|e| Error::Transcription(format!("multipart mime: {e}")))?;
@@ -77,17 +79,13 @@ impl Transcription for Hosted {
         let resp = self
             .http
             .post(self.endpoint)
-            .bearer_auth(&self.token)
+            .bearer_auth(self.token.expose_secret())
             .multipart(form)
             .send()
-            .await
-            .map_err(|e| Error::Transcription(format!("request failed: {e}")))?;
+            .await?;
 
         let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| Error::Transcription(format!("read response: {e}")))?;
+        let body = resp.text().await?;
         if !status.is_success() {
             return Err(Error::Transcription(format!(
                 "{} returned {}: {}",
@@ -97,8 +95,7 @@ impl Transcription for Hosted {
             )));
         }
 
-        let parsed: TranscriptionResponse = serde_json::from_str(&body)
-            .map_err(|e| Error::Transcription(format!("decode response: {e}")))?;
+        let parsed: TranscriptionResponse = serde_json::from_str(&body)?;
         Ok(parsed.text)
     }
 }

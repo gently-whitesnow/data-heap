@@ -1,34 +1,45 @@
 //! Ingestion polling loop. One task per configured source; each task owns its
-//! [`IngestionSource`] adapter, long-polls it, and persists every message via
-//! the [`Storage`] port.
+//! [`TelegramSource`] adapter, long-polls it, persists every message via the
+//! [`Storage`] port, and obeys a shared [`CancellationToken`] for shutdown.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use reqwest::Client;
+use tokio_util::sync::CancellationToken;
+
+use crate::adapters::telegram::{PollOutcome, TelegramSource};
 use crate::adapters::transcription;
-use crate::adapters::TelegramSource;
-use crate::config::{Config, SourceConfig};
+use crate::config::SourceConfig;
 use crate::domain::error::Result;
 use crate::domain::ports::{IncomingMessage, IngestionSource, Storage};
 use crate::domain::source::Space;
 
-/// Cool-down after a poll error before retrying — keeps a flaky network or
-/// rate-limited bot from spinning the CPU.
-const BACKOFF_SECS: u64 = 5;
+/// Backoff bounds: start small so transient hiccups don't pause ingestion
+/// for long, cap so a persistent outage doesn't grow into a multi-minute
+/// blackout that hides from the operator.
+const BACKOFF_MIN: Duration = Duration::from_secs(1);
+const BACKOFF_MAX: Duration = Duration::from_secs(60);
 
-pub async fn run(config: Config, storage: Arc<dyn Storage>) {
-    if config.sources.is_empty() {
+pub async fn run(
+    sources: Vec<SourceConfig>,
+    http: Client,
+    storage: Arc<dyn Storage>,
+    shutdown: CancellationToken,
+) {
+    if sources.is_empty() {
         tracing::warn!("no sources configured; polling loop idle");
-        std::future::pending::<()>().await;
+        shutdown.cancelled().await;
         return;
     }
-    tracing::info!(sources = config.sources.len(), "polling loop starting");
+    tracing::info!(sources = sources.len(), "polling loop starting");
     let mut handles = Vec::new();
-    for src in &config.sources {
-        match build_source(src, storage.clone()) {
+    for src in sources {
+        match build_source(&src, &http, storage.clone()) {
             Ok(adapter) => {
                 let storage = storage.clone();
-                handles.push(tokio::spawn(run_source(adapter, storage)));
+                let shutdown = shutdown.clone();
+                handles.push(tokio::spawn(run_source(adapter, storage, shutdown)));
             }
             Err(e) => {
                 tracing::error!(source = %src.slug, error = %e, "failed to build source");
@@ -40,49 +51,114 @@ pub async fn run(config: Config, storage: Arc<dyn Storage>) {
     }
 }
 
-fn build_source(src: &SourceConfig, storage: Arc<dyn Storage>) -> Result<Box<dyn IngestionSource>> {
+fn build_source(
+    src: &SourceConfig,
+    http: &Client,
+    storage: Arc<dyn Storage>,
+) -> Result<TelegramSource> {
     let transcription = transcription::build(
+        http,
         src.transcription_provider,
-        src.transcription_token.as_deref(),
+        src.transcription_token.as_ref(),
     )?;
-    let adapter = TelegramSource::with_transcription(
-        &src.slug,
+    Ok(TelegramSource::with_transcription(
+        src.slug.clone(),
         Space::new(src.space.clone()),
-        &src.bot_token,
+        clone_secret(&src.bot_token),
         transcription,
+        http.clone(),
         storage,
-    )?;
-    Ok(Box::new(adapter))
+    ))
 }
 
-async fn run_source(mut source: Box<dyn IngestionSource>, storage: Arc<dyn Storage>) {
+fn clone_secret(s: &secrecy::SecretString) -> secrecy::SecretString {
+    use secrecy::ExposeSecret;
+    secrecy::SecretString::from(s.expose_secret().to_owned())
+}
+
+async fn run_source(
+    mut source: TelegramSource,
+    storage: Arc<dyn Storage>,
+    shutdown: CancellationToken,
+) {
     let slug = source.slug().to_string();
     tracing::info!(source = %slug, space = %source.space(), "source poller started");
+    let mut backoff = BACKOFF_MIN;
     loop {
-        match source.poll().await {
-            Ok(messages) => {
-                if let Err(e) = persist_batch(source.as_ref(), &messages, storage.as_ref()).await {
+        if shutdown.is_cancelled() {
+            tracing::info!(source = %slug, "shutdown; poller exiting");
+            return;
+        }
+        let outcome = tokio::select! {
+            res = source.poll_outcome() => res,
+            () = shutdown.cancelled() => {
+                tracing::info!(source = %slug, "shutdown; poller exiting");
+                return;
+            }
+        };
+        match outcome {
+            Ok(PollOutcome::Batch(messages)) => {
+                backoff = BACKOFF_MIN;
+                if let Err(e) = persist_batch(&source, messages, storage.as_ref()).await {
                     tracing::error!(source = %slug, error = %e, "persist batch failed");
                 }
             }
+            Ok(PollOutcome::RetryAfter(delay)) => {
+                sleep_or_shutdown(delay, &shutdown).await;
+            }
             Err(e) => {
-                tracing::warn!(source = %slug, error = %e, "poll failed; backing off");
-                tokio::time::sleep(Duration::from_secs(BACKOFF_SECS)).await;
+                let delay = backoff_with_jitter(backoff);
+                tracing::warn!(
+                    source = %slug,
+                    error = %e,
+                    backoff_secs = delay.as_secs(),
+                    "poll failed; backing off"
+                );
+                sleep_or_shutdown(delay, &shutdown).await;
+                backoff = (backoff * 2).min(BACKOFF_MAX);
             }
         }
     }
 }
 
+async fn sleep_or_shutdown(delay: Duration, shutdown: &CancellationToken) {
+    tokio::select! {
+        () = tokio::time::sleep(delay) => {}
+        () = shutdown.cancelled() => {}
+    }
+}
+
+/// Apply ±25% jitter so several pollers waking from a shared outage don't
+/// thunder-herd the upstream when it recovers.
+fn backoff_with_jitter(base: Duration) -> Duration {
+    let base_ms = base.as_millis() as u64;
+    if base_ms == 0 {
+        return base;
+    }
+    let entropy = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::from(d.subsec_nanos()));
+    let span = base_ms / 2; // ±25% means ±(base/4); span here is base/2 width
+    let jitter = if span == 0 { 0 } else { entropy % span };
+    let adjusted = base_ms.saturating_sub(span / 2).saturating_add(jitter);
+    Duration::from_millis(adjusted)
+}
+
 async fn persist_batch(
-    source: &dyn IngestionSource,
-    messages: &[IncomingMessage],
+    source: &TelegramSource,
+    messages: Vec<IncomingMessage>,
     storage: &dyn Storage,
 ) -> Result<()> {
-    for msg in messages {
-        let item = msg
-            .clone()
-            .into_new_item(source.slug().to_string(), source.space().clone());
-        let id = storage.insert_item(&item)?;
+    if messages.is_empty() {
+        return Ok(());
+    }
+    let items: Vec<_> = messages
+        .iter()
+        .cloned()
+        .map(|m| m.into_new_item(source.slug().to_string(), source.space().clone()))
+        .collect();
+    let ids = storage.insert_items(items.clone()).await?;
+    for (msg, (item, id)) in messages.iter().zip(items.iter().zip(ids.iter())) {
         tracing::debug!(
             source = source.slug(),
             chat_id = msg.chat_id,
@@ -91,7 +167,7 @@ async fn persist_batch(
             kind = item.kind.as_str(),
             "item stored"
         );
-        if let Err(e) = source.confirm_saved(msg, id).await {
+        if let Err(e) = source.confirm_saved(msg, *id).await {
             tracing::warn!(
                 source = source.slug(),
                 item_id = %id,

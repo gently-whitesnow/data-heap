@@ -7,6 +7,7 @@
 //! confirmation message so the button disappears.
 
 use reqwest::Client;
+use secrecy::{ExposeSecret, SecretString};
 use serde_json::{json, Value};
 
 use crate::domain::error::{Error, Result};
@@ -31,8 +32,8 @@ const DELETED_NOTICE: &str = "🗑 удалено";
 const TOAST_DELETED: &str = "Удалено";
 const TOAST_ALREADY_GONE: &str = "Уже удалено";
 
-pub(super) fn method_url(base_url: &str, token: &str, method: &str) -> String {
-    format!("{base_url}/bot{token}/{method}")
+pub(super) fn method_url(base_url: &str, token: &SecretString, method: &str) -> String {
+    format!("{base_url}/bot{}/{method}", token.expose_secret())
 }
 
 /// Send the post-save echo with the delete button. Failures are logged by the
@@ -41,7 +42,7 @@ pub(super) fn method_url(base_url: &str, token: &str, method: &str) -> String {
 pub async fn send_confirmation(
     http: &Client,
     base_url: &str,
-    token: &str,
+    token: &SecretString,
     chat_id: i64,
     reply_to_message_id: i64,
     saved_text: &str,
@@ -57,14 +58,12 @@ pub async fn send_confirmation(
         .post(method_url(base_url, token, "sendMessage"))
         .json(&body)
         .send()
-        .await
-        .map_err(|e| Error::Storage(format!("telegram sendMessage: {e}")))?
+        .await?
         .json()
-        .await
-        .map_err(|e| Error::Storage(format!("telegram sendMessage decode: {e}")))?;
+        .await?;
     if !resp.ok {
-        return Err(Error::Storage(format!(
-            "telegram sendMessage: {}",
+        return Err(Error::Telegram(format!(
+            "sendMessage: {}",
             resp.description.unwrap_or_else(|| "unknown error".into())
         )));
     }
@@ -77,7 +76,7 @@ pub async fn send_confirmation(
 pub async fn handle_delete_callback(
     http: &Client,
     base_url: &str,
-    token: &str,
+    token: &SecretString,
     storage: &dyn Storage,
     query: &CallbackQuery,
 ) -> Result<()> {
@@ -87,8 +86,8 @@ pub async fn handle_delete_callback(
         return Ok(());
     };
 
-    let already_gone = storage.get_item(item_id)?.is_none();
-    storage.delete_item(item_id)?;
+    let already_gone = storage.get_item(item_id).await?.is_none();
+    storage.delete_item(item_id).await?;
 
     if let Some(msg) = query.message.as_ref() {
         if let Err(e) =
@@ -133,7 +132,7 @@ fn preview(text: &str) -> String {
 async fn edit_to_deleted_notice(
     http: &Client,
     base_url: &str,
-    token: &str,
+    token: &SecretString,
     chat_id: i64,
     message_id: i64,
 ) -> Result<()> {
@@ -146,16 +145,14 @@ async fn edit_to_deleted_notice(
         .post(method_url(base_url, token, "editMessageText"))
         .json(&body)
         .send()
-        .await
-        .map_err(|e| Error::Storage(format!("telegram editMessageText: {e}")))?
+        .await?
         .json()
-        .await
-        .map_err(|e| Error::Storage(format!("telegram editMessageText decode: {e}")))?;
+        .await?;
     if !resp.ok {
         // "message is not modified" is harmless: same edit issued twice.
         let desc = resp.description.unwrap_or_default();
         if !desc.contains("message is not modified") {
-            return Err(Error::Storage(format!("telegram editMessageText: {desc}")));
+            return Err(Error::Telegram(format!("editMessageText: {desc}")));
         }
     }
     Ok(())
@@ -164,7 +161,7 @@ async fn edit_to_deleted_notice(
 async fn answer_callback(
     http: &Client,
     base_url: &str,
-    token: &str,
+    token: &SecretString,
     callback_query_id: &str,
     text: Option<&str>,
 ) -> Result<()> {
@@ -176,11 +173,9 @@ async fn answer_callback(
         .post(method_url(base_url, token, "answerCallbackQuery"))
         .json(&body)
         .send()
-        .await
-        .map_err(|e| Error::Storage(format!("telegram answerCallbackQuery: {e}")))?
+        .await?
         .json()
-        .await
-        .map_err(|e| Error::Storage(format!("telegram answerCallbackQuery decode: {e}")))?;
+        .await?;
     if !resp.ok {
         tracing::warn!(
             error = %resp.description.unwrap_or_default(),
