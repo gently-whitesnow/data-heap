@@ -47,6 +47,10 @@ pub struct SourceConfig {
     pub transcription_provider: TranscriptionProvider,
     #[serde(default, deserialize_with = "deserialize_optional_secret")]
     pub transcription_token: Option<SecretString>,
+    /// Telegram `from.id` values permitted to write to this bot. Empty/missing
+    /// list is fail-closed: every incoming message is silently dropped.
+    #[serde(default)]
+    pub allowed_user_ids: Vec<i64>,
 }
 
 impl std::fmt::Debug for SourceConfig {
@@ -60,6 +64,7 @@ impl std::fmt::Debug for SourceConfig {
                 "transcription_token",
                 &self.transcription_token.as_ref().map(|_| "<redacted>"),
             )
+            .field("allowed_user_ids", &self.allowed_user_ids)
             .finish()
     }
 }
@@ -127,6 +132,12 @@ impl Config {
                     "duplicate source slug '{}'",
                     src.slug
                 )));
+            }
+            if src.allowed_user_ids.is_empty() {
+                tracing::warn!(
+                    source = %src.slug,
+                    "allowed_user_ids is empty; every incoming message will be silently dropped"
+                );
             }
         }
         Ok(())

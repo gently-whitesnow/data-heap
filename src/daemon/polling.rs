@@ -68,6 +68,7 @@ fn build_source(
         transcription,
         http.clone(),
         storage,
+        src.allowed_user_ids.iter().copied().collect(),
     ))
 }
 

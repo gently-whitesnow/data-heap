@@ -73,6 +73,31 @@ transcription_provider = "openai"
 }
 
 #[test]
+fn parses_allowed_user_ids_per_source() {
+    let raw = r#"
+[[sources]]
+slug = "gated"
+space = "inbox"
+bot_token = "1:A"
+allowed_user_ids = [111, 222]
+"#;
+    let cfg = Config::from_toml(raw).expect("valid");
+    assert_eq!(cfg.sources[0].allowed_user_ids, vec![111, 222]);
+}
+
+#[test]
+fn empty_allowed_user_ids_is_accepted_fail_closed() {
+    let raw = r#"
+[[sources]]
+slug = "gated"
+space = "inbox"
+bot_token = "1:A"
+"#;
+    let cfg = Config::from_toml(raw).expect("valid: empty list means fail-closed");
+    assert!(cfg.sources[0].allowed_user_ids.is_empty());
+}
+
+#[test]
 fn none_provider_needs_no_token() {
     let raw = r#"
 [[sources]]
