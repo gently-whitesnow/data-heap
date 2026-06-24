@@ -7,7 +7,9 @@ use crate::domain::ports::{IncomingMessage, IncomingPayload};
 use super::api::{Message, MessageEntity};
 
 fn is_bot_command(entities: &[MessageEntity]) -> bool {
-    entities.iter().any(|e| e.kind == "bot_command" && e.offset == 0)
+    entities
+        .iter()
+        .any(|e| e.kind == "bot_command" && e.offset == 0)
 }
 
 /// What the polling loop should do with a parsed Telegram message.
