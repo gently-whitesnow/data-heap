@@ -7,5 +7,5 @@ pub mod source;
 
 pub use error::{Error, Result};
 pub use item::{Item, ItemId, ItemKind, NewItem, TelegramMetadata};
-pub use ports::{IncomingMessage, IngestionSource, Storage, Transcription};
+pub use ports::{IncomingMessage, IncomingPayload, IngestionSource, Storage, Transcription};
 pub use source::{Source, Space, TranscriptionProvider};
