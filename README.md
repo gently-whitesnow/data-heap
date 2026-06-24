@@ -82,9 +82,14 @@ curl -X POST http://127.0.0.1:8080/v1/items/processed \
 
 ## Скиллы для агентов
 
-В репозитории лежат скиллы (claude/codex) с инструкциями, как пользоваться HTTP API через `curl`,
-по аналогии с подходом intent-скилла: получить новые item по `slug`+`space` и отметить их
+В репозитории лежат скиллы для фоновых агентов (hermes, openclaw и др.) с инструкциями, как
+пользоваться HTTP API через `curl`: забрать новые item по `agent_slug`+`space` и отметить их
 обработанными.
+
+- Канон — [`skills/data-heap/SKILL.md`](skills/data-heap/SKILL.md).
+- Триггерные шимы, редиректящие в канон: [`.claude/skills/data-heap/SKILL.md`](.claude/skills/data-heap/SKILL.md) (Claude)
+  и [`.agents/skills/data-heap/SKILL.md`](.agents/skills/data-heap/SKILL.md) (Codex CLI).
+
 ## Технологии
 
 Rust, единый бинарь/crate (демон: Telegram polling + HTTP API), SQLite.
