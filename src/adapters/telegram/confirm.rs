@@ -81,11 +81,7 @@ pub async fn handle_delete_callback(
     storage: &dyn Storage,
     query: &CallbackQuery,
 ) -> Result<()> {
-    let Some(item_id) = query
-        .data
-        .as_deref()
-        .and_then(parse_delete_callback)
-    else {
+    let Some(item_id) = query.data.as_deref().and_then(parse_delete_callback) else {
         // Unknown action — still ack so the spinner stops, then no-op.
         answer_callback(http, base_url, token, &query.id, None).await?;
         return Ok(());
@@ -95,7 +91,9 @@ pub async fn handle_delete_callback(
     storage.delete_item(item_id)?;
 
     if let Some(msg) = query.message.as_ref() {
-        if let Err(e) = edit_to_deleted_notice(http, base_url, token, msg.chat.id, msg.message_id).await {
+        if let Err(e) =
+            edit_to_deleted_notice(http, base_url, token, msg.chat.id, msg.message_id).await
+        {
             tracing::warn!(error = %e, "edit confirmation message failed");
         }
     }

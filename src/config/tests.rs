@@ -4,7 +4,6 @@ use crate::domain::source::TranscriptionProvider;
 const SAMPLE: &str = r#"
 [daemon]
 database_path = "/var/lib/data-heap.sqlite"
-poll_interval_secs = 3
 http_addr = "127.0.0.1:9000"
 
 [[sources]]
@@ -23,7 +22,6 @@ bot_token = "222:BBB"
 #[test]
 fn parses_full_config() {
     let cfg = Config::from_toml(SAMPLE).expect("valid config");
-    assert_eq!(cfg.daemon.poll_interval_secs, 3);
     assert_eq!(cfg.daemon.http_addr, "127.0.0.1:9000");
     assert_eq!(cfg.sources.len(), 2);
 
@@ -39,7 +37,6 @@ fn parses_full_config() {
 #[test]
 fn applies_daemon_defaults() {
     let cfg = Config::from_toml("").expect("empty config is valid");
-    assert_eq!(cfg.daemon.poll_interval_secs, 5);
     assert_eq!(cfg.daemon.http_addr, "127.0.0.1:8080");
     assert_eq!(cfg.daemon.database_path, PathBuf::from("data-heap.sqlite"));
     assert!(cfg.sources.is_empty());

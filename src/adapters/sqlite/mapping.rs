@@ -57,8 +57,9 @@ fn decode(
     extra_raw: String,
     created_at: i64,
 ) -> Result<Item> {
-    let kind = ItemKind::parse(&kind_raw)
-        .ok_or_else(|| Error::Storage(format!("unknown item kind '{kind_raw}'")))?;
+    let kind = kind_raw
+        .parse::<ItemKind>()
+        .map_err(|e| Error::Storage(e.to_string()))?;
     let extra: TelegramExtra = serde_json::from_str(&extra_raw)
         .map_err(|e| Error::Serialization(format!("item {id} metadata: {e}")))?;
     Ok(Item {

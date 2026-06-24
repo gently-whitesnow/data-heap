@@ -22,7 +22,9 @@ use serde_json::json;
 
 use crate::domain::error::{Error, Result};
 use crate::domain::item::ItemId;
-use crate::domain::ports::{IncomingMessage, IncomingPayload, IngestionSource, Storage, Transcription};
+use crate::domain::ports::{
+    IncomingMessage, IncomingPayload, IngestionSource, Storage, Transcription,
+};
 use crate::domain::source::Space;
 
 use self::api::{Message, Response, Update};
@@ -259,9 +261,9 @@ impl IngestionSource for TelegramSource {
 
     async fn confirm_saved(&self, message: &IncomingMessage, item_id: ItemId) -> Result<()> {
         let saved_text = match &message.payload {
-            IncomingPayload::Text(t)
-            | IncomingPayload::Caption(t)
-            | IncomingPayload::Voice(t) => t.as_str(),
+            IncomingPayload::Text(t) | IncomingPayload::Caption(t) | IncomingPayload::Voice(t) => {
+                t.as_str()
+            }
         };
         if let Err(e) = confirm::send_confirmation(
             &self.http,

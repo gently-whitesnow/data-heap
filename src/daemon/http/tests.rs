@@ -37,9 +37,10 @@ fn new_item(space: &str, message_id: i64, text: &str) -> NewItem {
 }
 
 async fn list(base: &str, agent: &str, space: &str, limit: Option<u32>) -> Vec<Value> {
+    use std::fmt::Write;
     let mut url = format!("{base}/v1/items?agent_slug={agent}&space={space}");
     if let Some(l) = limit {
-        url.push_str(&format!("&limit={l}"));
+        write!(url, "&limit={l}").unwrap();
     }
     let resp = reqwest::get(&url).await.unwrap();
     assert_eq!(resp.status(), 200, "GET {url} expected 200");
@@ -70,7 +71,9 @@ async fn list_returns_only_items_in_requested_space_oldest_first() {
     let _ = storage
         .insert_item(&new_item("expenses", 2, "wrong space"))
         .unwrap();
-    let b = storage.insert_item(&new_item("inbox", 3, "second")).unwrap();
+    let b = storage
+        .insert_item(&new_item("inbox", 3, "second"))
+        .unwrap();
 
     let items = list(&base, "hermes", "inbox", None).await;
     let ids: Vec<i64> = items.iter().map(|v| v["id"].as_i64().unwrap()).collect();
@@ -89,7 +92,10 @@ async fn mark_processed_hides_item_from_same_agent_only() {
     assert_eq!(mark(&base, "hermes", id).await, 204);
 
     let for_hermes = list(&base, "hermes", "inbox", None).await;
-    assert!(for_hermes.is_empty(), "hermes should not see processed item");
+    assert!(
+        for_hermes.is_empty(),
+        "hermes should not see processed item"
+    );
 
     let for_openclaw = list(&base, "openclaw", "inbox", None).await;
     assert_eq!(for_openclaw.len(), 1, "other agents are unaffected");

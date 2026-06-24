@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
 
 use super::source::Space;
@@ -37,14 +39,29 @@ impl ItemKind {
             ItemKind::Voice => "voice",
         }
     }
+}
 
-    pub fn parse(value: &str) -> Option<Self> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownItemKind(pub String);
+
+impl std::fmt::Display for UnknownItemKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown item kind '{}'", self.0)
+    }
+}
+
+impl std::error::Error for UnknownItemKind {}
+
+impl FromStr for ItemKind {
+    type Err = UnknownItemKind;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
         match value {
-            "text" => Some(ItemKind::Text),
-            "link" => Some(ItemKind::Link),
-            "caption" => Some(ItemKind::Caption),
-            "voice" => Some(ItemKind::Voice),
-            _ => None,
+            "text" => Ok(ItemKind::Text),
+            "link" => Ok(ItemKind::Link),
+            "caption" => Ok(ItemKind::Caption),
+            "voice" => Ok(ItemKind::Voice),
+            other => Err(UnknownItemKind(other.to_string())),
         }
     }
 }
