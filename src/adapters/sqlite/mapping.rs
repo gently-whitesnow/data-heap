@@ -1,7 +1,7 @@
 use rusqlite::Row;
 use serde::{Deserialize, Serialize};
 
-use crate::domain::error::{Error, Result};
+use crate::domain::error::Result;
 use crate::domain::item::{Item, ItemId, ItemKind, TelegramMetadata};
 use crate::domain::source::Space;
 
@@ -23,7 +23,7 @@ pub fn extra_json(meta: &TelegramMetadata) -> Result<String> {
         username: meta.username.clone(),
         date: meta.date,
     };
-    serde_json::to_string(&extra).map_err(|e| Error::Serialization(e.to_string()))
+    Ok(serde_json::to_string(&extra)?)
 }
 
 /// Map an `items` row to a domain [`Item`]. The outer `rusqlite::Result`
@@ -57,11 +57,8 @@ fn decode(
     extra_raw: String,
     created_at: i64,
 ) -> Result<Item> {
-    let kind = kind_raw
-        .parse::<ItemKind>()
-        .map_err(|e| Error::Storage(e.to_string()))?;
-    let extra: TelegramExtra = serde_json::from_str(&extra_raw)
-        .map_err(|e| Error::Serialization(format!("item {id} metadata: {e}")))?;
+    let kind = kind_raw.parse::<ItemKind>()?;
+    let extra: TelegramExtra = serde_json::from_str(&extra_raw)?;
     Ok(Item {
         id: ItemId(id),
         source,

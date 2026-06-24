@@ -5,36 +5,66 @@ mod http;
 mod polling;
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use crate::config::Config;
+use reqwest::Client;
+use tokio_util::sync::CancellationToken;
+
+use crate::config::{Config, SourceConfig};
 use crate::domain::error::{Error, Result};
 use crate::domain::ports::Storage;
+
+/// HTTP client timeout. Covers Telegram long-poll headroom (25s) and slow
+/// hosted transcription providers (60s cold start); per-call sleeps are not
+/// added on top.
+const HTTP_TIMEOUT_SECS: u64 = 90;
 
 /// Sync config-declared sources into storage, then run the polling and HTTP
 /// loops concurrently until Ctrl-C.
 pub async fn run(config: Config, storage: Arc<dyn Storage>) -> Result<()> {
-    sync_sources(&config, storage.as_ref())?;
+    sync_sources(&config.sources, storage.as_ref()).await?;
 
-    let poll = tokio::spawn(polling::run(config.clone(), storage.clone()));
-    let http = tokio::spawn(http::run(config.clone(), storage.clone()));
+    let http_client = build_http_client()?;
+    let shutdown = CancellationToken::new();
+
+    let polling_handle = tokio::spawn(polling::run(
+        config.sources,
+        http_client.clone(),
+        storage.clone(),
+        shutdown.clone(),
+    ));
+    let http_handle = tokio::spawn(http::run(
+        config.daemon.http_addr,
+        storage.clone(),
+        shutdown.clone(),
+    ));
 
     tracing::info!("data-heap daemon running; press Ctrl-C to stop");
-    tokio::signal::ctrl_c()
-        .await
-        .map_err(|e| Error::Io(std::io::Error::other(e)))?;
+    tokio::select! {
+        res = tokio::signal::ctrl_c() => {
+            res.map_err(|e| Error::Io(std::io::Error::other(e)))?;
+            tracing::info!("shutdown signal received, stopping daemon");
+        }
+        () = shutdown.cancelled() => {
+            tracing::info!("shutdown signalled internally");
+        }
+    }
+    shutdown.cancel();
 
-    tracing::info!("shutdown signal received, stopping daemon");
-    poll.abort();
-    http.abort();
+    let _ = tokio::join!(polling_handle, http_handle);
     Ok(())
 }
 
-/// Reconcile the source registry with config: every configured source is
-/// upserted so the daemon's view matches the TOML on each start.
-fn sync_sources(config: &Config, storage: &dyn Storage) -> Result<()> {
-    for source in &config.sources {
-        storage.upsert_source(&source.to_source())?;
+fn build_http_client() -> Result<Client> {
+    Ok(Client::builder()
+        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+        .build()?)
+}
+
+async fn sync_sources(sources: &[SourceConfig], storage: &dyn Storage) -> Result<()> {
+    for source in sources {
+        storage.upsert_source(source.to_source()).await?;
     }
-    tracing::info!(count = config.sources.len(), "sources synced into storage");
+    tracing::info!(count = sources.len(), "sources synced into storage");
     Ok(())
 }

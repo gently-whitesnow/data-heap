@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use bytes::Bytes;
 
 use super::error::Result;
 use super::item::{Item, ItemId, ItemKind, NewItem, TelegramMetadata};
@@ -6,31 +7,42 @@ use super::source::{Source, Space};
 
 /// Persistence port. The domain depends on this trait; adapters (SQLite first)
 /// implement it. Object-safe and `Send + Sync` so it can be shared as
-/// `Arc<dyn Storage>` across daemon tasks.
+/// `Arc<dyn Storage>` across daemon tasks. Methods are async so adapters can
+/// hop blocking I/O onto a dedicated pool (see [`crate::adapters::SqliteStorage`]).
+#[async_trait]
 pub trait Storage: Send + Sync {
     /// Bring the schema up to the latest version. Idempotent.
-    fn migrate(&self) -> Result<()>;
+    async fn migrate(&self) -> Result<()>;
 
     /// Register a source or update its mutable fields (space, transcription).
-    fn upsert_source(&self, source: &Source) -> Result<()>;
+    async fn upsert_source(&self, source: Source) -> Result<()>;
 
-    fn list_sources(&self) -> Result<Vec<Source>>;
+    async fn list_sources(&self) -> Result<Vec<Source>>;
 
     /// Persist a new item and return its assigned id.
-    fn insert_item(&self, item: &NewItem) -> Result<ItemId>;
+    async fn insert_item(&self, item: NewItem) -> Result<ItemId>;
 
-    fn get_item(&self, id: ItemId) -> Result<Option<Item>>;
+    /// Persist a batch of items in a single transaction. Returns the assigned
+    /// ids in the same order as `items` (or the existing id for duplicates).
+    async fn insert_items(&self, items: Vec<NewItem>) -> Result<Vec<ItemId>>;
+
+    async fn get_item(&self, id: ItemId) -> Result<Option<Item>>;
 
     /// Items in `space` not yet marked processed by `agent_slug`, oldest first.
-    fn fetch_unprocessed(&self, agent_slug: &str, space: &str, limit: u32) -> Result<Vec<Item>>;
+    async fn fetch_unprocessed(
+        &self,
+        agent_slug: &str,
+        space: &Space,
+        limit: u32,
+    ) -> Result<Vec<Item>>;
 
     /// Mark `(agent_slug, item)` processed. Idempotent; independent per agent.
-    fn mark_processed(&self, agent_slug: &str, item_id: ItemId) -> Result<()>;
+    async fn mark_processed(&self, agent_slug: &str, item_id: ItemId) -> Result<()>;
 
     /// Soft-delete an item: it disappears from `get_item`/`fetch_unprocessed`
     /// but its row and any prior `processed_marks` survive. Idempotent —
     /// deleting an already-deleted or missing item is a no-op.
-    fn delete_item(&self, item_id: ItemId) -> Result<()>;
+    async fn delete_item(&self, item_id: ItemId) -> Result<()>;
 }
 
 /// The text-bearing content of a message that the ingestion adapter decided is
@@ -43,8 +55,8 @@ pub enum IncomingPayload {
     /// Caption attached to a non-text message (photo/video/document).
     Caption(String),
     /// Transcript of a voice message. The adapter has already downloaded the
-    /// audio, run it through [`Transcription`], and deleted the temp file —
-    /// the daemon only sees the resulting text.
+    /// audio, run it through [`Transcription`], and discarded the bytes — the
+    /// daemon only sees the resulting text.
     Voice(String),
 }
 
@@ -130,7 +142,7 @@ pub trait IngestionSource: Send + Sync {
 /// the original Telegram file name (e.g. `voice.oga`) matters.
 #[async_trait]
 pub trait Transcription: Send + Sync {
-    async fn transcribe(&self, audio: &[u8], filename: &str) -> Result<String>;
+    async fn transcribe(&self, audio: Bytes, filename: &str) -> Result<String>;
 }
 
 #[cfg(test)]

@@ -15,7 +15,8 @@ async fn main() -> Result<()> {
     tracing::info!(path = %config_path, "loading config");
     let config = Config::load(&config_path)?;
 
-    let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::open(&config.daemon.database_path)?);
+    let storage: Arc<dyn Storage> =
+        Arc::new(SqliteStorage::open(&config.daemon.database_path).await?);
     tracing::info!(db = %config.daemon.database_path.display(), "storage ready");
 
     daemon::run(config, storage).await

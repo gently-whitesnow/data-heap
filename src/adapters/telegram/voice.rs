@@ -1,18 +1,12 @@
-//! Voice flow: Telegram `getFile` → download bytes → write to a temp file →
-//! transcribe → temp file is deleted on drop (success and error paths alike).
+//! Voice flow: Telegram `getFile` → download bytes → transcribe.
 //!
-//! The temp file exists for two reasons: it gives the OS a single resource
-//! handle to clean up if the process is killed mid-transcription, and it makes
-//! the "downloaded then deleted" guarantee in the spec a concrete artifact
-//! rather than only an in-memory promise. The bytes are still passed to the
-//! [`Transcription`] port directly to avoid forcing every adapter through
-//! disk I/O.
+//! The bytes never touch disk: `reqwest::bytes()` already yields a
+//! `Bytes` buffer that `multipart::Part::stream` consumes without copying.
 
-use std::io::Write;
-
+use bytes::Bytes;
 use reqwest::Client;
+use secrecy::{ExposeSecret, SecretString};
 use serde_json::json;
-use tempfile::NamedTempFile;
 
 use crate::domain::error::{Error, Result};
 use crate::domain::ports::Transcription;
@@ -26,7 +20,7 @@ const MAX_VOICE_BYTES: usize = 20 * 1024 * 1024;
 pub async fn transcribe_voice(
     http: &Client,
     base_url: &str,
-    token: &str,
+    token: &SecretString,
     file_id: &str,
     mime_type: Option<&str>,
     transcription: &dyn Transcription,
@@ -47,62 +41,49 @@ pub async fn transcribe_voice(
         )));
     }
 
-    // Materialize the download on disk under a tempfile guard. The handle
-    // drops at the end of this function — both on Ok and on the `?` early
-    // returns from `transcribe`.
-    let tempfile =
-        NamedTempFile::new().map_err(|e| Error::Transcription(format!("temp file: {e}")))?;
-    tempfile
-        .as_file()
-        .write_all(&bytes)
-        .map_err(|e| Error::Transcription(format!("write temp file: {e}")))?;
-
     let filename = derive_filename(&info.file_path, mime_type);
-    let transcript = transcription.transcribe(&bytes, &filename).await?;
-    // `tempfile` drops here, removing the file — explicit close also works
-    // but RAII is enough.
-    Ok(transcript)
+    transcription.transcribe(bytes, &filename).await
 }
 
-async fn get_file(http: &Client, base_url: &str, token: &str, file_id: &str) -> Result<FileInfo> {
-    let url = format!("{base_url}/bot{token}/getFile");
+async fn get_file(
+    http: &Client,
+    base_url: &str,
+    token: &SecretString,
+    file_id: &str,
+) -> Result<FileInfo> {
+    let url = format!("{base_url}/bot{}/getFile", token.expose_secret());
     let resp: Response<FileInfo> = http
         .post(&url)
         .json(&json!({ "file_id": file_id }))
         .send()
-        .await
-        .map_err(|e| Error::Transcription(format!("telegram getFile: {e}")))?
+        .await?
         .json()
-        .await
-        .map_err(|e| Error::Transcription(format!("telegram getFile decode: {e}")))?;
+        .await?;
     if !resp.ok {
-        return Err(Error::Transcription(format!(
-            "telegram getFile: {}",
+        return Err(Error::Telegram(format!(
+            "getFile: {}",
             resp.description.unwrap_or_else(|| "unknown error".into())
         )));
     }
     resp.result
-        .ok_or_else(|| Error::Transcription("telegram getFile returned no result".into()))
+        .ok_or_else(|| Error::Telegram("getFile returned no result".into()))
 }
 
-async fn download(http: &Client, base_url: &str, token: &str, file_path: &str) -> Result<Vec<u8>> {
-    let url = format!("{base_url}/file/bot{token}/{file_path}");
-    let resp = http
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| Error::Transcription(format!("telegram file download: {e}")))?;
+async fn download(
+    http: &Client,
+    base_url: &str,
+    token: &SecretString,
+    file_path: &str,
+) -> Result<Bytes> {
+    let url = format!("{base_url}/file/bot{}/{file_path}", token.expose_secret());
+    let resp = http.get(&url).send().await?;
     let status = resp.status();
     if !status.is_success() {
-        return Err(Error::Transcription(format!(
-            "telegram file download returned {status}"
+        return Err(Error::Telegram(format!(
+            "file download returned {status}"
         )));
     }
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| Error::Transcription(format!("telegram file body: {e}")))?;
-    Ok(bytes.to_vec())
+    Ok(resp.bytes().await?)
 }
 
 fn derive_filename(file_path: &str, mime_type: Option<&str>) -> String {

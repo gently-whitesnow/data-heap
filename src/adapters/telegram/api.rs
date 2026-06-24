@@ -13,6 +13,17 @@ pub struct Response<T> {
     pub description: Option<String>,
     #[serde(default)]
     pub result: Option<T>,
+    #[serde(default)]
+    pub parameters: Option<ResponseParameters>,
+}
+
+/// Optional metadata Telegram attaches to non-ok responses. The only field we
+/// act on is `retry_after` — seconds the bot must wait after a 429 before
+/// hitting the same method again.
+#[derive(Debug, Default, Deserialize)]
+pub struct ResponseParameters {
+    #[serde(default)]
+    pub retry_after: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
