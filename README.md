@@ -61,6 +61,25 @@ HTTP API) и по блоку `[[sources]]` на каждый бот — `slug`, 
 Полный пример — в [`config.example.toml`](config.example.toml). Запуск: `data-heap [config.toml]`
 (по умолчанию ищется `./config.toml`).
 
+## HTTP API
+
+Локальный HTTP API (`127.0.0.1:8080` по умолчанию, без auth — рассчитан на localhost).
+Агент знает свой `agent_slug` и `space`, ходит двумя ручками:
+
+```bash
+# Забрать новые item: ещё не отмеченные processed этим agent_slug.
+# Параметры: agent_slug, space, опционально limit (по умолчанию 50, максимум 500).
+curl 'http://127.0.0.1:8080/v1/items?agent_slug=hermes&space=expenses&limit=50'
+
+# Отметить item обработанным. Идемпотентно; mark одного агента не влияет на других.
+curl -X POST http://127.0.0.1:8080/v1/items/processed \
+     -H 'content-type: application/json' \
+     -d '{"agent_slug":"hermes","item_id":42}'
+```
+
+Ответ `GET /v1/items` — массив объектов `{id, source, space, kind, text, telegram, created_at}`,
+отсортированный по `id ASC` (сначала старые). `POST /v1/items/processed` отвечает `204 No Content`.
+
 ## Скиллы для агентов
 
 В репозитории лежат скиллы (claude/codex) с инструкциями, как пользоваться HTTP API через `curl`,

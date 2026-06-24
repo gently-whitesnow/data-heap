@@ -1,5 +1,5 @@
-//! Daemon scaffold: wires storage to the polling and HTTP loops and runs them
-//! until shutdown. Both loops are empty stubs in this slice.
+//! Daemon entry point: wires storage to the ingestion polling loop and the
+//! consumer-facing HTTP API, then runs both concurrently until shutdown.
 
 mod http;
 mod polling;
