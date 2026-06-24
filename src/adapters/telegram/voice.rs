@@ -50,8 +50,8 @@ pub async fn transcribe_voice(
     // Materialize the download on disk under a tempfile guard. The handle
     // drops at the end of this function — both on Ok and on the `?` early
     // returns from `transcribe`.
-    let tempfile = NamedTempFile::new()
-        .map_err(|e| Error::Transcription(format!("temp file: {e}")))?;
+    let tempfile =
+        NamedTempFile::new().map_err(|e| Error::Transcription(format!("temp file: {e}")))?;
     tempfile
         .as_file()
         .write_all(&bytes)
@@ -120,7 +120,7 @@ fn derive_filename(file_path: &str, mime_type: Option<&str>) -> String {
         Some("audio/ogg") => "oga",
         Some("audio/mpeg") => "mp3",
         Some("audio/mp4") => "m4a",
-        Some("audio/wav") | Some("audio/x-wav") => "wav",
+        Some("audio/wav" | "audio/x-wav") => "wav",
         Some("audio/webm") => "webm",
         _ => "ogg",
     };

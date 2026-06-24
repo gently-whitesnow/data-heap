@@ -120,7 +120,9 @@ async fn mark_processed(
 fn require_field<'a>(value: &'a str, field: &str) -> Result<&'a str, ApiError> {
     let v = value.trim();
     if v.is_empty() {
-        return Err(ApiError::bad_request(format!("'{field}' must not be empty")));
+        return Err(ApiError::bad_request(format!(
+            "'{field}' must not be empty"
+        )));
     }
     Ok(v)
 }

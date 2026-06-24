@@ -1,3 +1,6 @@
+use std::convert::Infallible;
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
 
 /// A space groups items by purpose (`expenses`, `thoughts`, `links`, `inbox`, …).
@@ -19,6 +22,14 @@ impl Space {
 impl From<String> for Space {
     fn from(s: String) -> Self {
         Space(s)
+    }
+}
+
+impl FromStr for Space {
+    type Err = Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Space(s.to_string()))
     }
 }
 

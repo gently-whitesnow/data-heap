@@ -20,8 +20,6 @@ pub struct Config {
 pub struct DaemonConfig {
     #[serde(default = "default_database_path")]
     pub database_path: PathBuf,
-    #[serde(default = "default_poll_interval_secs")]
-    pub poll_interval_secs: u64,
     #[serde(default = "default_http_addr")]
     pub http_addr: String,
 }
@@ -30,7 +28,6 @@ impl Default for DaemonConfig {
     fn default() -> Self {
         DaemonConfig {
             database_path: default_database_path(),
-            poll_interval_secs: default_poll_interval_secs(),
             http_addr: default_http_addr(),
         }
     }
@@ -123,10 +120,6 @@ impl Config {
 
 fn default_database_path() -> PathBuf {
     PathBuf::from("data-heap.sqlite")
-}
-
-fn default_poll_interval_secs() -> u64 {
-    5
 }
 
 fn default_http_addr() -> String {

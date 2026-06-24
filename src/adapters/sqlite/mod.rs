@@ -49,7 +49,9 @@ impl SqliteStorage {
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         // A poisoned lock means a prior panic mid-query; recovering the guard is
         // safe here since each call runs a self-contained statement.
-        self.conn.lock().unwrap_or_else(|e| e.into_inner())
+        self.conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -195,8 +197,7 @@ impl Storage for SqliteStorage {
 fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 fn map_sqlite(err: rusqlite::Error) -> Error {

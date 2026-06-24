@@ -4,8 +4,6 @@
 [daemon]
 # SQLite database file; created on first run.
 database_path = "data-heap.sqlite"
-# Telegram long-polling interval, seconds.
-poll_interval_secs = 5
 # Local HTTP API bind address (agents connect here).
 http_addr = "127.0.0.1:8080"
 

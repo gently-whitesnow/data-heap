@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! data-heap: text ingestion service core.
 //!
 //! Clean architecture / ports & adapters. The [`domain`] layer holds entities and
