@@ -126,6 +126,64 @@ fn mark_processed_is_idempotent() {
 }
 
 #[test]
+fn delete_item_hides_from_get_and_fetch() {
+    let storage = SqliteStorage::open_in_memory().unwrap();
+    let id = storage
+        .insert_item(&sample_item("inbox", "ephemeral", 1))
+        .unwrap();
+    storage.delete_item(id).unwrap();
+
+    assert!(
+        storage.get_item(id).unwrap().is_none(),
+        "deleted item is hidden from get_item"
+    );
+    assert!(
+        storage
+            .fetch_unprocessed("hermes", "inbox", 10)
+            .unwrap()
+            .is_empty(),
+        "deleted item is hidden from fetch_unprocessed"
+    );
+}
+
+#[test]
+fn delete_item_is_idempotent_and_keeps_processed_marks() {
+    let storage = SqliteStorage::open_in_memory().unwrap();
+    let id = storage.insert_item(&sample_item("inbox", "x", 1)).unwrap();
+    storage.mark_processed("hermes", id).unwrap();
+
+    storage.delete_item(id).unwrap();
+    storage.delete_item(id).unwrap();
+    // Re-marking a processed-then-deleted item must not violate the FK
+    // (the item row survives) and must remain a no-op.
+    storage.mark_processed("hermes", id).unwrap();
+}
+
+#[test]
+fn delete_unknown_item_is_no_op() {
+    let storage = SqliteStorage::open_in_memory().unwrap();
+    storage.delete_item(ItemId(9999)).unwrap();
+}
+
+#[test]
+fn delete_then_reinsert_same_telegram_message_keeps_tombstone() {
+    let storage = SqliteStorage::open_in_memory().unwrap();
+    let id = storage
+        .insert_item(&sample_item("inbox", "first", 7))
+        .unwrap();
+    storage.delete_item(id).unwrap();
+
+    // A re-delivered update for the same (chat_id, message_id) must stay
+    // deduplicated against the tombstoned row so a deleted item does not
+    // come back to life on the next polling pass.
+    let id2 = storage
+        .insert_item(&sample_item("inbox", "retry", 7))
+        .unwrap();
+    assert_eq!(id, id2, "dedup still returns the existing (deleted) id");
+    assert!(storage.get_item(id).unwrap().is_none());
+}
+
+#[test]
 fn fetch_respects_limit() {
     let storage = SqliteStorage::open_in_memory().unwrap();
     for i in 0..5 {

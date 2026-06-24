@@ -129,7 +129,7 @@ impl Storage for SqliteStorage {
         let conn = self.lock();
         conn.query_row(
             "SELECT id, source, space, kind, text, chat_id, message_id, telegram_extra, created_at
-             FROM items WHERE id = ?1",
+             FROM items WHERE id = ?1 AND deleted_at IS NULL",
             [id.0],
             mapping::row_to_item,
         )
@@ -146,6 +146,7 @@ impl Storage for SqliteStorage {
                         i.chat_id, i.message_id, i.telegram_extra, i.created_at
                  FROM items i
                  WHERE i.space = ?1
+                   AND i.deleted_at IS NULL
                    AND NOT EXISTS (
                        SELECT 1 FROM processed_marks m
                        WHERE m.item_id = i.id AND m.agent_slug = ?2
@@ -174,6 +175,17 @@ impl Storage for SqliteStorage {
              VALUES (?1, ?2, ?3)
              ON CONFLICT(agent_slug, item_id) DO NOTHING",
             rusqlite::params![agent_slug, item_id.0, now_unix()],
+        )
+        .map_err(map_sqlite)?;
+        Ok(())
+    }
+
+    fn delete_item(&self, item_id: ItemId) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE items SET deleted_at = ?1
+             WHERE id = ?2 AND deleted_at IS NULL",
+            rusqlite::params![now_unix(), item_id.0],
         )
         .map_err(map_sqlite)?;
         Ok(())

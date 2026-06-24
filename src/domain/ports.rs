@@ -26,6 +26,11 @@ pub trait Storage: Send + Sync {
 
     /// Mark `(agent_slug, item)` processed. Idempotent; independent per agent.
     fn mark_processed(&self, agent_slug: &str, item_id: ItemId) -> Result<()>;
+
+    /// Soft-delete an item: it disappears from `get_item`/`fetch_unprocessed`
+    /// but its row and any prior `processed_marks` survive. Idempotent —
+    /// deleting an already-deleted or missing item is a no-op.
+    fn delete_item(&self, item_id: ItemId) -> Result<()>;
 }
 
 /// The text-bearing content of a message that the ingestion adapter decided is
@@ -97,7 +102,7 @@ fn is_url_only(text: &str) -> bool {
 /// adapter is the first implementation; webhook/import adapters can follow
 /// without touching the daemon or domain.
 #[async_trait]
-pub trait IngestionSource: Send {
+pub trait IngestionSource: Send + Sync {
     fn slug(&self) -> &str;
 
     fn space(&self) -> &Space;
@@ -105,6 +110,14 @@ pub trait IngestionSource: Send {
     /// Pull the next batch of messages. Implementations may long-poll: the call
     /// is allowed to block for tens of seconds before returning an empty batch.
     async fn poll(&mut self) -> Result<Vec<IncomingMessage>>;
+
+    /// Confirm to the user that `message` was persisted as `item_id`. Interactive
+    /// sources (Telegram) echo the saved text back with an inline "delete"
+    /// affordance bound to `item_id`; non-interactive sources can leave the
+    /// default no-op.
+    async fn confirm_saved(&self, _message: &IncomingMessage, _item_id: ItemId) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Speech-to-text port. Implementations live behind a provider switch in

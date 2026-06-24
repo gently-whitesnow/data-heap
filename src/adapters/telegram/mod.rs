@@ -4,11 +4,12 @@
 //! One adapter instance = one bot = one space (pinned at construction). The
 //! adapter is fully self-contained: it owns the HTTP client, holds the
 //! `update_id` offset between polls, downloads and transcribes voice messages
-//! through an optional [`Transcription`] port, and replies in chat to
-//! unsupported or failed message kinds — the caller only sees text-bearing
-//! messages.
+//! through an optional [`Transcription`] port, replies in chat to unsupported
+//! or failed message kinds, and handles the slice-3.5 save-confirmation +
+//! inline-delete callback flow against a [`Storage`] reference.
 
 mod api;
+mod confirm;
 mod parse;
 mod voice;
 
@@ -20,7 +21,8 @@ use reqwest::Client;
 use serde_json::json;
 
 use crate::domain::error::{Error, Result};
-use crate::domain::ports::{IncomingMessage, IncomingPayload, IngestionSource, Transcription};
+use crate::domain::item::ItemId;
+use crate::domain::ports::{IncomingMessage, IncomingPayload, IngestionSource, Storage, Transcription};
 use crate::domain::source::Space;
 
 use self::api::{Message, Response, Update};
@@ -50,11 +52,17 @@ pub struct TelegramSource {
     http: Client,
     offset: i64,
     transcription: Option<Arc<dyn Transcription>>,
+    storage: Arc<dyn Storage>,
 }
 
 impl TelegramSource {
-    pub fn new(slug: impl Into<String>, space: Space, token: impl Into<String>) -> Result<Self> {
-        Self::with_base_url(slug, space, token, DEFAULT_BASE_URL, None)
+    pub fn new(
+        slug: impl Into<String>,
+        space: Space,
+        token: impl Into<String>,
+        storage: Arc<dyn Storage>,
+    ) -> Result<Self> {
+        Self::with_base_url(slug, space, token, DEFAULT_BASE_URL, None, storage)
     }
 
     pub fn with_transcription(
@@ -62,8 +70,9 @@ impl TelegramSource {
         space: Space,
         token: impl Into<String>,
         transcription: Option<Arc<dyn Transcription>>,
+        storage: Arc<dyn Storage>,
     ) -> Result<Self> {
-        Self::with_base_url(slug, space, token, DEFAULT_BASE_URL, transcription)
+        Self::with_base_url(slug, space, token, DEFAULT_BASE_URL, transcription, storage)
     }
 
     pub fn with_base_url(
@@ -72,6 +81,7 @@ impl TelegramSource {
         token: impl Into<String>,
         base_url: impl Into<String>,
         transcription: Option<Arc<dyn Transcription>>,
+        storage: Arc<dyn Storage>,
     ) -> Result<Self> {
         let http = Client::builder()
             .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
@@ -85,6 +95,7 @@ impl TelegramSource {
             http,
             offset: 0,
             transcription,
+            storage,
         })
     }
 
@@ -96,7 +107,7 @@ impl TelegramSource {
         let body = json!({
             "offset": self.offset,
             "timeout": LONG_POLL_SECS,
-            "allowed_updates": ["message"],
+            "allowed_updates": ["message", "callback_query"],
         });
         let resp: Response<Vec<Update>> = self
             .http
@@ -207,6 +218,20 @@ impl IngestionSource for TelegramSource {
             if upd.update_id >= self.offset {
                 self.offset = upd.update_id + 1;
             }
+            if let Some(cb) = upd.callback_query {
+                if let Err(e) = confirm::handle_delete_callback(
+                    &self.http,
+                    &self.base_url,
+                    &self.token,
+                    self.storage.as_ref(),
+                    &cb,
+                )
+                .await
+                {
+                    tracing::warn!(source = %self.slug, error = %e, "callback_query handling failed");
+                }
+                continue;
+            }
             let Some(msg) = upd.message else { continue };
             match parse(&msg) {
                 Parsed::Incoming(im) => out.push(im),
@@ -230,5 +255,27 @@ impl IngestionSource for TelegramSource {
             }
         }
         Ok(out)
+    }
+
+    async fn confirm_saved(&self, message: &IncomingMessage, item_id: ItemId) -> Result<()> {
+        let saved_text = match &message.payload {
+            IncomingPayload::Text(t)
+            | IncomingPayload::Caption(t)
+            | IncomingPayload::Voice(t) => t.as_str(),
+        };
+        if let Err(e) = confirm::send_confirmation(
+            &self.http,
+            &self.base_url,
+            &self.token,
+            message.chat_id,
+            message.message_id,
+            saved_text,
+            item_id,
+        )
+        .await
+        {
+            tracing::warn!(source = %self.slug, error = %e, "confirmation reply failed");
+        }
+        Ok(())
     }
 }
