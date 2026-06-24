@@ -76,13 +76,24 @@ transcription_provider = "openai"
 }
 
 #[test]
-fn local_whisper_needs_no_token() {
-    let raw = r#"
+fn local_whisper_needs_url_not_token() {
+    let with_url = r#"
+[[sources]]
+slug = "voice"
+space = "inbox"
+bot_token = "1:A"
+transcription_provider = "local_whisper"
+transcription_url = "http://127.0.0.1:9000"
+"#;
+    assert!(Config::from_toml(with_url).is_ok());
+
+    let no_url = r#"
 [[sources]]
 slug = "voice"
 space = "inbox"
 bot_token = "1:A"
 transcription_provider = "local_whisper"
 "#;
-    assert!(Config::from_toml(raw).is_ok());
+    let err = Config::from_toml(no_url).unwrap_err();
+    assert!(matches!(err, Error::Config(msg) if msg.contains("transcription_url")));
 }

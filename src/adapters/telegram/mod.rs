@@ -3,12 +3,16 @@
 //!
 //! One adapter instance = one bot = one space (pinned at construction). The
 //! adapter is fully self-contained: it owns the HTTP client, holds the
-//! `update_id` offset between polls, and replies in chat to unsupported message
-//! kinds — the caller only sees text-bearing messages.
+//! `update_id` offset between polls, downloads and transcribes voice messages
+//! through an optional [`Transcription`] port, and replies in chat to
+//! unsupported or failed message kinds — the caller only sees text-bearing
+//! messages.
 
 mod api;
 mod parse;
+mod voice;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -16,11 +20,11 @@ use reqwest::Client;
 use serde_json::json;
 
 use crate::domain::error::{Error, Result};
-use crate::domain::ports::{IncomingMessage, IngestionSource};
+use crate::domain::ports::{IncomingMessage, IncomingPayload, IngestionSource, Transcription};
 use crate::domain::source::Space;
 
 use self::api::{Message, Response, Update};
-use self::parse::{parse, Parsed};
+use self::parse::{parse, MessageSkeleton, Parsed};
 
 /// Telegram long-poll timeout, seconds. Server holds the request up to this
 /// long when there are no updates; keep below typical HTTP/proxy idle limits.
@@ -32,6 +36,12 @@ const HTTP_TIMEOUT_SECS: u64 = LONG_POLL_SECS + 10;
 /// Telegram Bot API base. Pulled out so tests can point at a mock server.
 const DEFAULT_BASE_URL: &str = "https://api.telegram.org";
 
+/// Voice-not-configured reply: the bot is alive but its source has
+/// `transcription_provider = "none"`, so we tell the user instead of silently
+/// dropping the message.
+const VOICE_DISABLED: &str =
+    "Транскрибация голосовых для этого бота отключена в конфиге (provider = \"none\").";
+
 pub struct TelegramSource {
     slug: String,
     space: Space,
@@ -39,11 +49,21 @@ pub struct TelegramSource {
     base_url: String,
     http: Client,
     offset: i64,
+    transcription: Option<Arc<dyn Transcription>>,
 }
 
 impl TelegramSource {
     pub fn new(slug: impl Into<String>, space: Space, token: impl Into<String>) -> Result<Self> {
-        Self::with_base_url(slug, space, token, DEFAULT_BASE_URL)
+        Self::with_base_url(slug, space, token, DEFAULT_BASE_URL, None)
+    }
+
+    pub fn with_transcription(
+        slug: impl Into<String>,
+        space: Space,
+        token: impl Into<String>,
+        transcription: Option<Arc<dyn Transcription>>,
+    ) -> Result<Self> {
+        Self::with_base_url(slug, space, token, DEFAULT_BASE_URL, transcription)
     }
 
     pub fn with_base_url(
@@ -51,6 +71,7 @@ impl TelegramSource {
         space: Space,
         token: impl Into<String>,
         base_url: impl Into<String>,
+        transcription: Option<Arc<dyn Transcription>>,
     ) -> Result<Self> {
         let http = Client::builder()
             .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
@@ -63,6 +84,7 @@ impl TelegramSource {
             base_url: base_url.into(),
             http,
             offset: 0,
+            transcription,
         })
     }
 
@@ -124,6 +146,46 @@ impl TelegramSource {
         }
         Ok(())
     }
+
+    async fn handle_voice(
+        &self,
+        msg: &Message,
+        file_id: &str,
+        mime_type: Option<&str>,
+        skeleton: MessageSkeleton,
+    ) -> Option<IncomingMessage> {
+        let Some(transcription) = self.transcription.as_ref() else {
+            if let Err(e) = self.send_reply(msg, VOICE_DISABLED).await {
+                tracing::warn!(source = %self.slug, error = %e, "voice-disabled reply failed");
+            }
+            return None;
+        };
+        match voice::transcribe_voice(
+            &self.http,
+            &self.base_url,
+            &self.token,
+            file_id,
+            mime_type,
+            transcription.as_ref(),
+        )
+        .await
+        {
+            Ok(transcript) => Some(skeleton.into_incoming(IncomingPayload::Voice(transcript))),
+            Err(err) => {
+                tracing::warn!(
+                    source = %self.slug,
+                    chat_id = msg.chat.id,
+                    error = %err,
+                    "voice transcription failed"
+                );
+                let reply = format!("Не удалось расшифровать голосовое: {err}");
+                if let Err(e) = self.send_reply(msg, &reply).await {
+                    tracing::warn!(source = %self.slug, error = %e, "voice-failed reply failed");
+                }
+                None
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -148,6 +210,18 @@ impl IngestionSource for TelegramSource {
             let Some(msg) = upd.message else { continue };
             match parse(&msg) {
                 Parsed::Incoming(im) => out.push(im),
+                Parsed::Voice {
+                    file_id,
+                    mime_type,
+                    skeleton,
+                } => {
+                    if let Some(im) = self
+                        .handle_voice(&msg, &file_id, mime_type.as_deref(), skeleton)
+                        .await
+                    {
+                        out.push(im);
+                    }
+                }
                 Parsed::Unsupported(reason) => {
                     if let Err(e) = self.send_reply(&msg, reason).await {
                         tracing::warn!(source = %self.slug, error = %e, "reply failed");

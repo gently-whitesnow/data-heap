@@ -60,9 +60,29 @@ fn document_without_caption_is_unsupported_binary() {
 }
 
 #[test]
-fn voice_is_unsupported_until_slice_three() {
-    let parsed = parse(&base_msg(json!({ "voice": { "file_id": "x" } })));
-    assert_eq!(parsed, Parsed::Unsupported(UNSUPPORTED_VOICE));
+fn voice_emits_voice_variant_with_file_id() {
+    let parsed = parse(&base_msg(json!({
+        "voice": { "file_id": "AwACvoice", "mime_type": "audio/ogg", "duration": 4 }
+    })));
+    let Parsed::Voice {
+        file_id,
+        mime_type,
+        skeleton,
+    } = parsed
+    else {
+        panic!("expected Voice variant, got {:?}", parsed);
+    };
+    assert_eq!(file_id, "AwACvoice");
+    assert_eq!(mime_type.as_deref(), Some("audio/ogg"));
+    assert_eq!(skeleton.chat_id, 42);
+    assert_eq!(skeleton.message_id, 10);
+    assert_eq!(skeleton.user_id, Some(7));
+}
+
+#[test]
+fn video_note_is_unsupported() {
+    let parsed = parse(&base_msg(json!({ "video_note": { "file_id": "x" } })));
+    assert_eq!(parsed, Parsed::Unsupported(UNSUPPORTED_VIDEO_NOTE));
 }
 
 #[test]

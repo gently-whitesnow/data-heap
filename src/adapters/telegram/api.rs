@@ -42,7 +42,7 @@ pub struct Message {
     #[serde(default)]
     pub audio: Option<serde_json::Value>,
     #[serde(default)]
-    pub voice: Option<serde_json::Value>,
+    pub voice: Option<Voice>,
     #[serde(default)]
     pub video_note: Option<serde_json::Value>,
     #[serde(default)]
@@ -61,4 +61,18 @@ pub struct User {
     pub id: i64,
     #[serde(default)]
     pub username: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Voice {
+    pub file_id: String,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct FileInfo {
+    pub file_path: String,
+    #[serde(default)]
+    pub file_size: Option<i64>,
 }

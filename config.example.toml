@@ -23,3 +23,13 @@ slug = "thoughts-bot"
 space = "thoughts"
 bot_token = "234567:REPLACE_ME"
 # Voice transcription disabled — provider defaults to "none".
+
+# Example: local OpenAI-compatible Whisper server (e.g. faster-whisper-server,
+# whisper.cpp's server). `transcription_token` is unused; `transcription_url`
+# is required and points to the /v1/audio/transcriptions endpoint.
+# [[sources]]
+# slug = "voice-bot"
+# space = "inbox"
+# bot_token = "345678:REPLACE_ME"
+# transcription_provider = "local_whisper"
+# transcription_url = "http://127.0.0.1:9000/v1/audio/transcriptions"

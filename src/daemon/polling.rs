@@ -5,8 +5,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::adapters::transcription;
 use crate::adapters::TelegramSource;
-use crate::config::Config;
+use crate::config::{Config, SourceConfig};
 use crate::domain::error::Result;
 use crate::domain::ports::{IngestionSource, Storage};
 use crate::domain::source::Space;
@@ -24,10 +25,10 @@ pub async fn run(config: Config, storage: Arc<dyn Storage>) {
     tracing::info!(sources = config.sources.len(), "polling loop starting");
     let mut handles = Vec::new();
     for src in &config.sources {
-        match TelegramSource::new(&src.slug, Space::new(src.space.clone()), &src.bot_token) {
+        match build_source(src) {
             Ok(adapter) => {
                 let storage = storage.clone();
-                handles.push(tokio::spawn(run_source(Box::new(adapter), storage)));
+                handles.push(tokio::spawn(run_source(adapter, storage)));
             }
             Err(e) => {
                 tracing::error!(source = %src.slug, error = %e, "failed to build source");
@@ -37,6 +38,21 @@ pub async fn run(config: Config, storage: Arc<dyn Storage>) {
     for h in handles {
         let _ = h.await;
     }
+}
+
+fn build_source(src: &SourceConfig) -> Result<Box<dyn IngestionSource>> {
+    let transcription = transcription::build(
+        src.transcription_provider,
+        src.transcription_token.as_deref(),
+        src.transcription_url.as_deref(),
+    )?;
+    let adapter = TelegramSource::with_transcription(
+        &src.slug,
+        Space::new(src.space.clone()),
+        &src.bot_token,
+        transcription,
+    )?;
+    Ok(Box::new(adapter))
 }
 
 async fn run_source(mut source: Box<dyn IngestionSource>, storage: Arc<dyn Storage>) {

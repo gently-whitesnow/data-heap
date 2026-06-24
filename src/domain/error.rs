@@ -16,6 +16,9 @@ pub enum Error {
     #[error("serialization error: {0}")]
     Serialization(String),
 
+    #[error("transcription error: {0}")]
+    Transcription(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
