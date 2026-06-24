@@ -1,8 +1,11 @@
 //! Infrastructure adapters implementing domain ports.
 //!
-//! This slice ships the SQLite [`Storage`](crate::domain::ports::Storage)
-//! adapter. Ingestion and transcription adapters arrive in later slices.
+//! SQLite implements [`Storage`](crate::domain::ports::Storage); Telegram
+//! implements [`IngestionSource`](crate::domain::ports::IngestionSource).
+//! Transcription arrives in slice 3.
 
 pub mod sqlite;
+pub mod telegram;
 
 pub use sqlite::SqliteStorage;
+pub use telegram::TelegramSource;
