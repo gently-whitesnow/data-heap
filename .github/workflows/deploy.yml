@@ -1,0 +1,112 @@
+# Деплой data-heap на VPS по кнопке.
+# Actions → "Deploy data-heap" → Run workflow.
+#
+# Один артефакт — self-contained Rust-бинарь + config.toml, заливаются атомарно
+# (releases/<sha> + переключение симлинка) в $DEPLOY_BASE/current. Сервер ничего
+# не собирает. Рестарт — через узкий sudoers у CI-юзера.
+#
+# Этот репозиторий публичный и абстрактный: деплой-специфика (какие боты, ID,
+# пространства, какой сервер) НЕ хранится в коде — она целиком в Actions secrets.
+#
+# Секреты репозитория (Settings → Secrets and variables → Actions → Secrets):
+#   DEPLOY_SSH_KEY    — приватный deploy-ключ (его .pub раздаётся серверу из инфра-репо)
+#   DEPLOY_HOST       — адрес сервера
+#   DATA_HEAP_CONFIG  — ВЕСЬ config.toml целиком (формат — см. config.example.toml):
+#                       [daemon] + блоки [[sources]] с bot_token / transcription_token /
+#                       allowed_user_ids. Чтобы добавить бота — правишь этот секрет.
+#
+# Переменные репозитория (… → Variables) — несекретная операционная конфигурация,
+# чтобы публичный код не раскрывал детали конкретного сервера:
+#   SSH_USER          — CI-юзер на сервере (в инфра-репо это ci_deploy_user)
+#   DEPLOY_BASE       — каталог релизов на сервере; ДОЛЖЕН совпадать с путём в
+#                       systemd-юните инфра-репо
+#
+# Безопасность публичного репо: триггер только workflow_dispatch (нет pull_request),
+# поэтому секреты недоступны форк-PR'ам, а запуск доступен лишь коллабораторам.
+name: Deploy data-heap
+
+on:
+  workflow_dispatch:
+
+# Минимум прав токену: деплой ходит по SSH, доступ к содержимому репо не нужен сверх чтения.
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-data-heap
+  cancel-in-progress: false
+
+env:
+  SSH_USER: ${{ vars.SSH_USER }}     # CI-юзер на сервере (несекретная переменная репо)
+  BASE: ${{ vars.DEPLOY_BASE }}      # каталог релизов; совпадает с systemd-юнитом инфра-репо
+  KEEP_RELEASES: 5
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04       # та же glibc, что на сервере (Ubuntu 24.04) → бинарь совместим
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preflight (vars/secrets заданы)
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          [ -n "$SSH_USER" ]    || { echo "::error::variable SSH_USER не задан"; exit 1; }
+          [ -n "$BASE" ]        || { echo "::error::variable DEPLOY_BASE не задан"; exit 1; }
+          [ -n "$DEPLOY_HOST" ] || { echo "::error::secret DEPLOY_HOST не задан"; exit 1; }
+
+      # ── Сборка (self-contained, glibc linux-x64) ─────────────────────────
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: |
+          cargo build --release --locked
+          test -x target/release/data-heap
+
+      # ── Конфиг приходит целиком из секрета — в репо его нет ───────────────
+      - name: Stage binary + config
+        env:
+          DATA_HEAP_CONFIG: ${{ secrets.DATA_HEAP_CONFIG }}
+        run: |
+          [ -n "$DATA_HEAP_CONFIG" ] || { echo "::error::secret DATA_HEAP_CONFIG не задан"; exit 1; }
+          mkdir -p out
+          cp target/release/data-heap out/data-heap
+          chmod 0755 out/data-heap
+          printf '%s\n' "$DATA_HEAP_CONFIG" > out/config.toml
+          chmod 0640 out/config.toml
+          # Грубая проверка вменяемости (хотя бы один источник).
+          grep -q '\[\[sources\]\]' out/config.toml || { echo "::error::в DATA_HEAP_CONFIG нет [[sources]]"; exit 1; }
+
+      # ── Доставка ─────────────────────────────────────────────────────────
+      - name: Setup SSH
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/id && chmod 600 ~/.ssh/id
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Deploy (rsync + restart)
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          REL="${BASE}/releases/${GITHUB_SHA}"
+          SSH="ssh -i ~/.ssh/id ${SSH_USER}@${HOST}"
+          $SSH "mkdir -p '${REL}'"
+          rsync -az --delete -e "ssh -i ~/.ssh/id" out/ "${SSH_USER}@${HOST}:${REL}/"
+          $SSH "ln -sfn '${REL}' '${BASE}/current'"
+          $SSH "ls -1dt ${BASE}/releases/*/ | tail -n +$((KEEP_RELEASES + 1)) | xargs -r rm -rf"
+          $SSH "sudo systemctl restart data-heap.service"
+
+      - name: Smoke check (loopback)
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          SSH="ssh -i ~/.ssh/id ${SSH_USER}@${HOST}"
+          # Дать демону подняться и применить миграции.
+          $SSH "sleep 3; systemctl is-active data-heap.service"
+          # HTTP API на loopback: без обязательных query-параметров вернёт 4xx —
+          # нам важно лишь, что порт отвечает (демон жив).
+          $SSH "curl -s -o /dev/null -w 'http=%{http_code}\n' 'http://127.0.0.1:8080/v1/items?agent_slug=ci&space=expenses' || true"
+          echo "Deployed ${GITHUB_SHA}"
