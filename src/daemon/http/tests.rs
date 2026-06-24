@@ -94,7 +94,10 @@ async fn list_returns_only_items_in_requested_space_oldest_first() {
 #[tokio::test]
 async fn mark_processed_hides_item_from_same_agent_only() {
     let (base, storage) = spawn().await;
-    let id = storage.insert_item(new_item("inbox", 1, "x")).await.unwrap();
+    let id = storage
+        .insert_item(new_item("inbox", 1, "x"))
+        .await
+        .unwrap();
 
     assert_eq!(mark(&base, "hermes", id).await, 204);
 
@@ -111,7 +114,10 @@ async fn mark_processed_hides_item_from_same_agent_only() {
 #[tokio::test]
 async fn mark_processed_is_idempotent() {
     let (base, storage) = spawn().await;
-    let id = storage.insert_item(new_item("inbox", 1, "x")).await.unwrap();
+    let id = storage
+        .insert_item(new_item("inbox", 1, "x"))
+        .await
+        .unwrap();
     assert_eq!(mark(&base, "hermes", id).await, 204);
     assert_eq!(mark(&base, "hermes", id).await, 204);
 }
@@ -155,7 +161,10 @@ async fn missing_query_param_is_bad_request() {
 #[tokio::test]
 async fn soft_deleted_items_are_hidden() {
     let (base, storage) = spawn().await;
-    let id = storage.insert_item(new_item("inbox", 1, "x")).await.unwrap();
+    let id = storage
+        .insert_item(new_item("inbox", 1, "x"))
+        .await
+        .unwrap();
     storage.delete_item(id).await.unwrap();
     let items = list(&base, "hermes", "inbox", None).await;
     assert!(items.is_empty());

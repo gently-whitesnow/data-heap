@@ -59,7 +59,11 @@ async fn insert_item_dedups_on_telegram_message() {
     let stored = storage.get_item(id1).await.unwrap().expect("item exists");
     assert_eq!(stored.text, "first", "duplicate insert is a no-op");
     assert_eq!(
-        storage.fetch_unprocessed("a", &inbox, 10).await.unwrap().len(),
+        storage
+            .fetch_unprocessed("a", &inbox, 10)
+            .await
+            .unwrap()
+            .len(),
         1
     );
 }

@@ -1,20 +1,19 @@
 //! SQLite adapter implementing the [`Storage`](crate::domain::ports::Storage) port.
 //!
-//! `rusqlite` is blocking, so the async trait wraps every call in
-//! `tokio::task::spawn_blocking`. The connection lives behind `Arc<Mutex<…>>`
-//! so the blocking closure can own a `'static` handle without touching the
-//! `tokio` runtime from inside it.
+//! Built on `sqlx`: a native async pool, typed row decoding, and built-in
+//! `sqlx::migrate!()`. No `spawn_blocking` wrappers — the pool drives I/O on
+//! tokio directly.
 
 mod mapping;
-mod migrations;
 mod ops;
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::str::FromStr;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use rusqlite::Connection;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
+use sqlx::{Pool, Sqlite};
 
 use crate::domain::error::{Error, Result};
 use crate::domain::item::{Item, ItemId, NewItem};
@@ -24,86 +23,65 @@ use crate::domain::source::{Source, Space};
 /// SQLite busy timeout — how long a writer waits on a lock held by another
 /// connection before failing with `SQLITE_BUSY`. Five seconds covers slow
 /// fsyncs without hanging the request.
-const BUSY_TIMEOUT_MS: u32 = 5_000;
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("src/adapters/sqlite/migrations");
 
 pub struct SqliteStorage {
-    conn: Arc<Mutex<Connection>>,
+    pool: Pool<Sqlite>,
 }
 
 impl SqliteStorage {
     /// Open (creating if needed) a database file and apply migrations.
     pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref().to_path_buf();
-        tokio::task::spawn_blocking(move || {
-            let conn = Connection::open(path)?;
-            Self::from_connection(conn)
-        })
-        .await?
+        let opts = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal)
+            .foreign_keys(true)
+            .busy_timeout(BUSY_TIMEOUT);
+        let pool = SqlitePoolOptions::new().connect_with(opts).await?;
+        Self::from_pool(pool).await
     }
 
-    /// In-memory database, for tests.
+    /// In-memory database, for tests. The pool is pinned to one connection
+    /// because `sqlite::memory:` is per-connection — multiple pool connections
+    /// would see independent empty databases.
     pub async fn open_in_memory() -> Result<Self> {
-        tokio::task::spawn_blocking(|| {
-            let conn = Connection::open_in_memory()?;
-            Self::from_connection(conn)
-        })
-        .await?
+        let opts = SqliteConnectOptions::from_str("sqlite::memory:")?
+            .foreign_keys(true)
+            .busy_timeout(BUSY_TIMEOUT);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await?;
+        Self::from_pool(pool).await
     }
 
-    fn from_connection(conn: Connection) -> Result<Self> {
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
-        conn.busy_timeout(std::time::Duration::from_millis(u64::from(BUSY_TIMEOUT_MS)))?;
-        let storage = SqliteStorage {
-            conn: Arc::new(Mutex::new(conn)),
-        };
-        migrations::run(&storage.lock())?;
-        Ok(storage)
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
-        // A poisoned lock means a prior panic mid-query; recovering the guard is
-        // safe here since each call runs a self-contained statement.
-        self.conn
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    async fn run<F, T>(&self, f: F) -> Result<T>
-    where
-        F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
-        T: Send + 'static,
-    {
-        let conn = self.conn.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut guard = conn
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            f(&mut guard)
-        })
-        .await?
+    async fn from_pool(pool: Pool<Sqlite>) -> Result<Self> {
+        MIGRATOR.run(&pool).await?;
+        Ok(SqliteStorage { pool })
     }
 }
 
 #[async_trait]
 impl Storage for SqliteStorage {
     async fn migrate(&self) -> Result<()> {
-        self.run(|conn| migrations::run(conn)).await
+        MIGRATOR.run(&self.pool).await.map_err(Error::from)
     }
 
     async fn upsert_source(&self, source: Source) -> Result<()> {
-        self.run(move |conn| ops::upsert_source(conn, &source)).await
+        ops::upsert_source(&self.pool, &source).await
     }
 
     async fn list_sources(&self) -> Result<Vec<Source>> {
-        self.run(|conn| ops::list_sources(conn)).await
+        ops::list_sources(&self.pool).await
     }
 
     async fn insert_item(&self, item: NewItem) -> Result<ItemId> {
         let now = now_unix()?;
-        self.run(move |conn| ops::insert_item(conn, &item, now))
-            .await
+        ops::insert_item(&self.pool, &item, now).await
     }
 
     async fn insert_items(&self, items: Vec<NewItem>) -> Result<Vec<ItemId>> {
@@ -111,12 +89,11 @@ impl Storage for SqliteStorage {
             return Ok(Vec::new());
         }
         let now = now_unix()?;
-        self.run(move |conn| ops::insert_items(conn, &items, now))
-            .await
+        ops::insert_items(&self.pool, &items, now).await
     }
 
     async fn get_item(&self, id: ItemId) -> Result<Option<Item>> {
-        self.run(move |conn| ops::get_item(conn, id)).await
+        ops::get_item(&self.pool, id).await
     }
 
     async fn fetch_unprocessed(
@@ -125,23 +102,17 @@ impl Storage for SqliteStorage {
         space: &Space,
         limit: u32,
     ) -> Result<Vec<Item>> {
-        let agent_slug = agent_slug.to_owned();
-        let space = space.as_str().to_owned();
-        self.run(move |conn| ops::fetch_unprocessed(conn, &agent_slug, &space, limit))
-            .await
+        ops::fetch_unprocessed(&self.pool, agent_slug, space.as_str(), limit).await
     }
 
     async fn mark_processed(&self, agent_slug: &str, item_id: ItemId) -> Result<()> {
-        let agent_slug = agent_slug.to_owned();
         let now = now_unix()?;
-        self.run(move |conn| ops::mark_processed(conn, &agent_slug, item_id, now))
-            .await
+        ops::mark_processed(&self.pool, agent_slug, item_id, now).await
     }
 
     async fn delete_item(&self, item_id: ItemId) -> Result<()> {
         let now = now_unix()?;
-        self.run(move |conn| ops::delete_item(conn, item_id, now))
-            .await
+        ops::delete_item(&self.pool, item_id, now).await
     }
 }
 

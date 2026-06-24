@@ -21,9 +21,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
-use tower_http::{
-    limit::RequestBodyLimitLayer, timeout::TimeoutLayer, trace::TraceLayer,
-};
+use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer, trace::TraceLayer};
 
 use crate::domain::error::Error;
 use crate::domain::item::{Item, ItemId, ItemKind, TelegramMetadata};

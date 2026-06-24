@@ -79,9 +79,7 @@ async fn download(
     let resp = http.get(&url).send().await?;
     let status = resp.status();
     if !status.is_success() {
-        return Err(Error::Telegram(format!(
-            "file download returned {status}"
-        )));
+        return Err(Error::Telegram(format!("file download returned {status}")));
     }
     Ok(resp.bytes().await?)
 }
