@@ -87,23 +87,21 @@ jobs:
           echo "$SSH_KEY" > ~/.ssh/id && chmod 600 ~/.ssh/id
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Deploy (rsync + restart)
+      - name: Deploy (rsync + activate)
         env:
           HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
           REL="${BASE}/releases/${GITHUB_SHA}"
           SSH="ssh -i ~/.ssh/id ${SSH_USER}@${HOST}"
-          # Релиз-каталог должен быть проходим по группе data-heap: сервисный юзер
-          # читает config.toml по группе. Родитель releases — setgid (см. роль в
-          # инфра-репо), поэтому группа наследуется; явный chmod 2750 выставляет
-          # rwx-биты, которые mkdir мог срезать по umask (иначе group r-x теряется).
-          $SSH "mkdir -p '${REL}' && chmod 2750 '${REL}'"
-          # Без -o/-g: группу задаёт setgid родителя (data-heap), а не группа раннера;
-          # -p сохраняет режимы (config 0640, бинарь 0755).
-          rsync -rlptz --delete -e "ssh -i ~/.ssh/id" out/ "${SSH_USER}@${HOST}:${REL}/"
-          $SSH "ln -sfn '${REL}' '${BASE}/current'"
+          $SSH "mkdir -p '${REL}'"
+          rsync -az --delete -e "ssh -i ~/.ssh/id" out/ "${SSH_USER}@${HOST}:${REL}/"
+          # Активация — привилегированный хелпер под root (узкий sudoers в инфра-репо):
+          # отдаёт релиз сервисному юзеру, поджимает секрет до 0640 data-heap:data-heap,
+          # атомарно переключает симлинк current и рестартит сервис. CI-юзер сам этого
+          # сделать не может (не root, не в группе сервиса) — секрет не утекает в его группу.
+          $SSH "sudo /usr/local/bin/data-heap-activate '${REL}'"
+          # Чистка старых релизов (каталог releases принадлежит CI-юзеру).
           $SSH "ls -1dt ${BASE}/releases/*/ | tail -n +$((KEEP_RELEASES + 1)) | xargs -r rm -rf"
-          $SSH "sudo systemctl restart data-heap.service"
 
       - name: Smoke check (loopback)
         env:
