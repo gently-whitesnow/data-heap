@@ -16,10 +16,16 @@ use crate::domain::ports::Storage;
 
 use super::api::{CallbackQuery, Response};
 
-/// Inline-button preview cap. Telegram allows up to 4096 chars in a message,
-/// but pasting a wall of text just to confirm a save buries the delete button
-/// and clutters the chat — truncate long items to a leading preview.
+/// Preview cap for text/link/caption echoes. Pasting a wall of text just to
+/// confirm a save buries the delete button and clutters the chat — truncate
+/// long items to a leading preview. Voice items bypass this (see
+/// [`send_confirmation`]) because the chat echo is the only transcript the user
+/// ever sees, so a cut there reads as lost data.
 const PREVIEW_CHAR_CAP: usize = 500;
+
+/// Hard per-message char limit imposed by Telegram. Full voice transcripts are
+/// split into chunks no larger than this before sending.
+const TELEGRAM_MSG_CHAR_CAP: usize = 4096;
 
 /// Prefix for the delete-item callback. Keeps `callback_data` self-describing
 /// in case other actions are added later (e.g. `kind:delete:<id>` style).
@@ -36,24 +42,76 @@ pub(super) fn method_url(base_url: &str, token: &SecretString, method: &str) -> 
     format!("{base_url}/bot{}/{method}", token.expose_secret())
 }
 
+/// How much of the saved text to echo back into the chat.
+pub enum Echo<'a> {
+    /// Truncated leading preview — text, links, captions.
+    Preview(&'a str),
+    /// Full text, split across messages — voice transcripts, where the chat
+    /// echo is the only transcript the user sees and a cut reads as lost data.
+    Full(&'a str),
+}
+
 /// Send the post-save echo with the delete button. Failures are logged by the
 /// caller; this returns an error so the caller can decide whether to surface
 /// it (Telegram rejecting a reply is non-fatal for the polling loop).
+///
+/// An [`Echo::Full`] payload is split across as many messages as Telegram's
+/// per-message limit requires, with the delete button on the last one. An
+/// [`Echo::Preview`] is sent as a single truncated message.
 pub async fn send_confirmation(
     http: &Client,
     base_url: &str,
     token: &SecretString,
     chat_id: i64,
     reply_to_message_id: i64,
-    saved_text: &str,
+    echo: Echo<'_>,
     item_id: ItemId,
 ) -> Result<()> {
-    let body = json!({
-        "chat_id": chat_id,
-        "text": preview(saved_text),
-        "reply_parameters": { "message_id": reply_to_message_id },
-        "reply_markup": delete_keyboard(item_id),
-    });
+    let saved_text = match echo {
+        Echo::Preview(text) => {
+            return send_message(
+                http,
+                base_url,
+                token,
+                chat_id,
+                &preview(text),
+                Some(reply_to_message_id),
+                Some(delete_keyboard(item_id)),
+            )
+            .await;
+        }
+        Echo::Full(text) => text,
+    };
+
+    let chunks = chunk_message(saved_text);
+    let last = chunks.len() - 1;
+    for (i, chunk) in chunks.iter().enumerate() {
+        // Reply-link only the first message; hang the delete button on the last.
+        let reply_to = (i == 0).then_some(reply_to_message_id);
+        let markup = (i == last).then(|| delete_keyboard(item_id));
+        send_message(http, base_url, token, chat_id, chunk, reply_to, markup).await?;
+    }
+    Ok(())
+}
+
+/// Send one chat message, optionally as a reply and optionally with an inline
+/// keyboard. Shared by the single-preview and chunked-voice paths.
+async fn send_message(
+    http: &Client,
+    base_url: &str,
+    token: &SecretString,
+    chat_id: i64,
+    text: &str,
+    reply_to_message_id: Option<i64>,
+    reply_markup: Option<Value>,
+) -> Result<()> {
+    let mut body = json!({ "chat_id": chat_id, "text": text });
+    if let Some(reply_to) = reply_to_message_id {
+        body["reply_parameters"] = json!({ "message_id": reply_to });
+    }
+    if let Some(markup) = reply_markup {
+        body["reply_markup"] = markup;
+    }
     let resp: Response<Value> = http
         .post(method_url(base_url, token, "sendMessage"))
         .json(&body)
@@ -127,6 +185,20 @@ fn preview(text: &str) -> String {
     }
     let head: String = trimmed.chars().take(PREVIEW_CHAR_CAP).collect();
     format!("{head}…")
+}
+
+/// Split text into Telegram-sized chunks, counting by chars (not bytes) so a
+/// multibyte boundary is never split. Always yields at least one chunk so the
+/// caller can unconditionally place the delete button on the last one.
+fn chunk_message(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.trim().chars().collect();
+    if chars.is_empty() {
+        return vec![String::new()];
+    }
+    chars
+        .chunks(TELEGRAM_MSG_CHAR_CAP)
+        .map(|c| c.iter().collect())
+        .collect()
 }
 
 async fn edit_to_deleted_notice(
@@ -221,5 +293,37 @@ mod tests {
         let p = preview(&mixed);
         assert!(p.ends_with('…'));
         assert_eq!(p.chars().count(), PREVIEW_CHAR_CAP + 1);
+    }
+
+    #[test]
+    fn chunk_keeps_short_text_as_single_message() {
+        let chunks = chunk_message("  short voice note  ");
+        assert_eq!(chunks, vec!["short voice note".to_string()]);
+    }
+
+    #[test]
+    fn chunk_splits_long_text_at_telegram_limit() {
+        let long: String = "а".repeat(TELEGRAM_MSG_CHAR_CAP * 2 + 17);
+        let chunks = chunk_message(&long);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].chars().count(), TELEGRAM_MSG_CHAR_CAP);
+        assert_eq!(chunks[1].chars().count(), TELEGRAM_MSG_CHAR_CAP);
+        assert_eq!(chunks[2].chars().count(), 17);
+        let rejoined: String = chunks.concat();
+        assert_eq!(rejoined.chars().count(), long.chars().count());
+    }
+
+    #[test]
+    fn chunk_counts_chars_not_bytes() {
+        let emoji: String = "💡".repeat(TELEGRAM_MSG_CHAR_CAP + 5);
+        let chunks = chunk_message(&emoji);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].chars().count(), TELEGRAM_MSG_CHAR_CAP);
+        assert_eq!(chunks[1].chars().count(), 5);
+    }
+
+    #[test]
+    fn chunk_empty_yields_one_empty_message() {
+        assert_eq!(chunk_message("   "), vec![String::new()]);
     }
 }

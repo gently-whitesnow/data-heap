@@ -353,13 +353,20 @@ impl IngestionSource for TelegramSource {
                 t.as_str()
             }
         };
+        // Voice transcripts echo in full (chunked) — the chat echo is the only
+        // transcript the user sees, so truncating it reads as lost data.
+        let echo = if matches!(message.payload, IncomingPayload::Voice(_)) {
+            confirm::Echo::Full(saved_text)
+        } else {
+            confirm::Echo::Preview(saved_text)
+        };
         if let Err(e) = confirm::send_confirmation(
             &self.http,
             &self.base_url,
             &self.token,
             message.chat_id,
             message.message_id,
-            saved_text,
+            echo,
             item_id,
         )
         .await
